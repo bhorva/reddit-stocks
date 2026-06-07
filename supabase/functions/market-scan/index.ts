@@ -1,0 +1,370 @@
+// Supabase Edge Function: market-scan
+//
+// Runs every 6 hours (triggered by pg_cron, see supabase/trading_schema.sql).
+// For each watchlist ticker it:
+//   1. counts recent Reddit mentions (real Reddit API, OAuth2 client-credentials)
+//   2. fetches the current price + a short history (Stooq, no API key needed)
+//   3. classifies the signal as organic / spike / pure-hype
+//   4. applies the pump-&-dip trading strategy and logs every trade
+//   5. records a portfolio balance snapshot for the chart
+//
+// Required secrets (set with `supabase secrets set`):
+//   REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET — from a "script" app at
+//   https://www.reddit.com/prefs/apps
+// SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided automatically.
+
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
+
+// ── Strategy constants (mirrors the file.html prototype) ────────────────
+const POSITION_SIZE = 0.12; // fraction of total portfolio value per buy
+const DIP_THRESH = -0.025; // buy once price has dropped this much from its recent high
+const TAKE_PROFIT = 0.04; // sell once a position gains this much
+const STOP_LOSS = -0.035; // sell once a position loses this much
+const MAX_POSITIONS = 5;
+const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
+
+const REDDIT_SUBREDDITS = ['stocks', 'wallstreetbets', 'investing'];
+const HISTORY_LOOKBACK = 8; // how many past signal rows to use for the hype baseline
+
+interface WatchlistRow {
+  ticker: string;
+  name: string;
+}
+
+interface SignalRow {
+  ticker: string;
+  scanned_at: string;
+  price: number;
+  mention_count: number;
+  hype_score: number;
+}
+
+interface PositionRow {
+  id: number;
+  ticker: string;
+  shares: number;
+  entry_price: number;
+}
+
+interface PortfolioRow {
+  cash: number;
+  realized_pnl: number;
+  total_fees: number;
+  trade_count: number;
+  blocked_count: number;
+  blocked_capital: number;
+}
+
+function swissquoteFee(amount: number): number {
+  if (amount < 500) return 15;
+  if (amount < 2000) return 25;
+  if (amount < 10000) return 30;
+  if (amount < 15000) return 55;
+  if (amount < 25000) return 80;
+  if (amount < 50000) return 135;
+  return 190;
+}
+
+// ── Reddit: OAuth2 client-credentials + mention search ──────────────────
+async function getRedditToken(): Promise<string> {
+  const clientId = Deno.env.get('REDDIT_CLIENT_ID');
+  const clientSecret = Deno.env.get('REDDIT_CLIENT_SECRET');
+  if (!clientId || !clientSecret) {
+    throw new Error('REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET secrets are not set');
+  }
+  const res = await fetch('https://www.reddit.com/api/v1/access_token', {
+    method: 'POST',
+    headers: {
+      Authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'User-Agent': 'reddit-stocks-market-scan/1.0',
+    },
+    body: 'grant_type=client_credentials',
+  });
+  if (!res.ok) {
+    throw new Error(`Reddit auth failed: ${res.status} ${await res.text()}`);
+  }
+  const data = await res.json();
+  return data.access_token as string;
+}
+
+/** Counts how often $TICKER (or the bare ticker as a word) was mentioned in
+ * the last 24h across the watched subreddits. */
+async function countRedditMentions(token: string, ticker: string): Promise<number> {
+  let total = 0;
+  const since = Date.now() / 1000 - 24 * 60 * 60;
+  for (const subreddit of REDDIT_SUBREDDITS) {
+    const url = `https://oauth.reddit.com/r/${subreddit}/search?q=${encodeURIComponent(
+      ticker,
+    )}&restrict_sr=1&sort=new&limit=50&t=day`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'User-Agent': 'reddit-stocks-market-scan/1.0',
+      },
+    });
+    if (!res.ok) {
+      console.warn(`Reddit search failed for r/${subreddit} ${ticker}: ${res.status}`);
+      continue;
+    }
+    const data = await res.json();
+    const posts: any[] = data?.data?.children ?? [];
+    const wordRe = new RegExp(`\\b\\$?${ticker}\\b`, 'i');
+    for (const post of posts) {
+      const created = post?.data?.created_utc ?? 0;
+      if (created < since) continue;
+      const text = `${post?.data?.title ?? ''} ${post?.data?.selftext ?? ''}`;
+      if (wordRe.test(text)) total += 1;
+    }
+  }
+  return total;
+}
+
+// ── Prices: Stooq daily CSV, no API key required ─────────────────────────
+async function fetchPriceHistory(ticker: string): Promise<number[]> {
+  const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(ticker.toLowerCase())}.us&i=d`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    throw new Error(`Stooq fetch failed for ${ticker}: ${res.status}`);
+  }
+  const csv = await res.text();
+  const lines = csv.trim().split('\n').slice(1); // drop header row
+  const closes = lines
+    .map((line) => parseFloat(line.split(',')[4]))
+    .filter((n) => Number.isFinite(n));
+  return closes.slice(-30); // last ~30 trading days, oldest first
+}
+
+// ── Hype classification ──────────────────────────────────────────────────
+type Verdict = 'organic' | 'spike' | 'pure-hype';
+
+function classify(
+  mentionCount: number,
+  history: SignalRow[],
+  priceHistory: number[],
+): { hypeScore: number; verdict: Verdict; blocked: boolean; reason: string } {
+  const baseline = history.length
+    ? history.reduce((sum, s) => sum + s.mention_count, 0) / history.length
+    : mentionCount;
+  const spread = Math.max(baseline, 1);
+  // Hype score: how far above its own baseline the mention count currently is,
+  // scaled into a 0-100 range (100 = 4x the historical average or more).
+  const hypeScore = Math.max(0, Math.min(100, ((mentionCount - baseline) / spread) * 33.3 + 30));
+
+  const priceTrend =
+    priceHistory.length >= 2 ? priceHistory[priceHistory.length - 1] - priceHistory[0] : 0;
+  const priceFallingOrFlat = priceTrend <= 0;
+  const isSpike = baseline > 0 && mentionCount > baseline * 3;
+
+  if (hypeScore > HYPE_BLOCK_THR && priceFallingOrFlat) {
+    return {
+      hypeScore,
+      verdict: 'pure-hype',
+      blocked: true,
+      reason:
+        `Hype-Score ${hypeScore.toFixed(0)} > ${HYPE_BLOCK_THR} bei ${mentionCount} Erwähnungen ` +
+        `(Ø ${baseline.toFixed(1)}), aber Kurs fällt/stagniert seit ${priceHistory.length} Tagen — ` +
+        `keine fundamentale Bestätigung. Geblockt.`,
+    };
+  }
+  if (isSpike && priceFallingOrFlat) {
+    return {
+      hypeScore,
+      verdict: 'spike',
+      blocked: false,
+      reason:
+        `Mention-Spike (${mentionCount} vs. Ø ${baseline.toFixed(1)}) ohne begleitende ` +
+        `Kursbewegung — verdächtig, wird beobachtet, aber nicht gehandelt.`,
+    };
+  }
+  return {
+    hypeScore,
+    verdict: 'organic',
+    blocked: false,
+    reason: `${mentionCount} Erwähnungen (Ø ${baseline.toFixed(1)}), Kursverlauf bestätigt die Richtung.`,
+  };
+}
+
+// ── Entry point ───────────────────────────────────────────────────────────
+Deno.serve(async () => {
+  const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
+  const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+  const supabase = createClient(supabaseUrl, serviceRoleKey);
+
+  const log: string[] = [];
+  try {
+    const { data: watchlist, error: watchlistError } = await supabase
+      .from('watchlist')
+      .select('ticker, name')
+      .eq('active', true);
+    if (watchlistError) throw watchlistError;
+
+    const { data: portfolioRow, error: portfolioError } = await supabase
+      .from('portfolio')
+      .select('*')
+      .eq('id', true)
+      .single();
+    if (portfolioError) throw portfolioError;
+    const portfolio = portfolioRow as PortfolioRow;
+
+    const { data: openPositions, error: positionsError } = await supabase
+      .from('positions')
+      .select('*');
+    if (positionsError) throw positionsError;
+    const positions = (openPositions ?? []) as PositionRow[];
+
+    const redditToken = await getRedditToken();
+    const latestPrices = new Map<string, number>();
+
+    for (const stock of (watchlist ?? []) as WatchlistRow[]) {
+      const { ticker } = stock;
+
+      const [mentionCount, priceHistory, { data: history }] = await Promise.all([
+        countRedditMentions(redditToken, ticker),
+        fetchPriceHistory(ticker),
+        supabase
+          .from('signals')
+          .select('ticker, scanned_at, price, mention_count, hype_score')
+          .eq('ticker', ticker)
+          .order('scanned_at', { ascending: false })
+          .limit(HISTORY_LOOKBACK),
+      ]);
+
+      if (priceHistory.length === 0) {
+        log.push(`${ticker}: keine Kursdaten von Stooq erhalten — übersprungen.`);
+        continue;
+      }
+      const price = priceHistory[priceHistory.length - 1];
+      latestPrices.set(ticker, price);
+
+      const { hypeScore, verdict, blocked, reason } = classify(
+        mentionCount,
+        (history ?? []) as SignalRow[],
+        priceHistory,
+      );
+
+      const { error: signalError } = await supabase.from('signals').insert({
+        ticker,
+        price,
+        mention_count: mentionCount,
+        hype_score: hypeScore,
+        verdict,
+        blocked,
+        reason,
+      });
+      if (signalError) throw signalError;
+      log.push(`${ticker}: ${verdict} (hype=${hypeScore.toFixed(0)}, mentions=${mentionCount}, price=${price})`);
+
+      if (blocked) {
+        portfolio.blocked_count += 1;
+        portfolio.blocked_capital += portfolio.cash * POSITION_SIZE;
+        continue;
+      }
+
+      // ── Sell check: existing position hit take-profit or stop-loss ──
+      const position = positions.find((p) => p.ticker === ticker);
+      if (position) {
+        const change = (price - position.entry_price) / position.entry_price;
+        if (change >= TAKE_PROFIT || change <= STOP_LOSS) {
+          const grossAmount = position.shares * price;
+          const fee = swissquoteFee(grossAmount);
+          const proceeds = grossAmount - fee;
+          const costBasis = position.shares * position.entry_price;
+          const realizedPnl = proceeds - costBasis;
+
+          await supabase.from('transactions').insert({
+            ticker,
+            action: 'sell',
+            shares: position.shares,
+            price,
+            fee,
+            gross_amount: grossAmount,
+            realized_pnl: realizedPnl,
+            reason:
+              change >= TAKE_PROFIT
+                ? `Take-Profit erreicht: +${(change * 100).toFixed(1)}% seit Einstieg.`
+                : `Stop-Loss ausgelöst: ${(change * 100).toFixed(1)}% seit Einstieg.`,
+          });
+          await supabase.from('positions').delete().eq('id', position.id);
+          positions.splice(positions.indexOf(position), 1);
+
+          portfolio.cash += proceeds;
+          portfolio.realized_pnl += realizedPnl;
+          portfolio.total_fees += fee;
+          portfolio.trade_count += 1;
+          log.push(`${ticker}: SELL ${position.shares} @ ${price} (PnL ${realizedPnl.toFixed(2)} CHF)`);
+          continue;
+        }
+      }
+
+      // ── Buy check: dip detected, room for a new position, organic verdict ──
+      if (
+        !position &&
+        verdict === 'organic' &&
+        positions.length < MAX_POSITIONS
+      ) {
+        const recentHigh = Math.max(...priceHistory);
+        const dropFromHigh = (price - recentHigh) / recentHigh;
+        if (dropFromHigh <= DIP_THRESH) {
+          const totalValue =
+            portfolio.cash +
+            positions.reduce((sum, p) => sum + p.shares * (latestPrices.get(p.ticker) ?? p.entry_price), 0);
+          const budget = totalValue * POSITION_SIZE;
+          const fee = swissquoteFee(budget);
+          const investable = budget - fee;
+          const shares = investable > 0 ? investable / price : 0;
+
+          if (shares > 0 && portfolio.cash >= budget) {
+            const grossAmount = shares * price;
+            await supabase.from('transactions').insert({
+              ticker,
+              action: 'buy',
+              shares,
+              price,
+              fee,
+              gross_amount: grossAmount,
+              reason: `Dip erkannt: ${(dropFromHigh * 100).toFixed(1)}% unter dem ${HISTORY_LOOKBACK}-Tage-Hoch, Hype organisch bestätigt.`,
+            });
+            const { data: inserted } = await supabase
+              .from('positions')
+              .insert({ ticker, shares, entry_price: price })
+              .select()
+              .single();
+            if (inserted) positions.push(inserted as PositionRow);
+
+            portfolio.cash -= grossAmount + fee;
+            portfolio.total_fees += fee;
+            portfolio.trade_count += 1;
+            log.push(`${ticker}: BUY ${shares.toFixed(4)} @ ${price} (fee ${fee} CHF)`);
+          }
+        }
+      }
+    }
+
+    // ── Persist portfolio + balance snapshot ──────────────────────────
+    await supabase
+      .from('portfolio')
+      .update({ ...portfolio, updated_at: new Date().toISOString() })
+      .eq('id', true);
+
+    const positionsValue = positions.reduce(
+      (sum, p) => sum + p.shares * (latestPrices.get(p.ticker) ?? p.entry_price),
+      0,
+    );
+    await supabase.from('balance_history').insert({
+      cash: portfolio.cash,
+      positions_value: positionsValue,
+      total_value: portfolio.cash + positionsValue,
+    });
+
+    return new Response(JSON.stringify({ ok: true, log }, null, 2), {
+      headers: { 'Content-Type': 'application/json' },
+    });
+  } catch (err) {
+    console.error(err);
+    return new Response(JSON.stringify({ ok: false, error: String(err), log }, null, 2), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+});
