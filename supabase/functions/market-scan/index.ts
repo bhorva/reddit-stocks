@@ -1,12 +1,19 @@
 // Supabase Edge Function: market-scan
 //
 // Runs every 6 hours (triggered by pg_cron, see supabase/trading_schema.sql).
-// For each watchlist ticker it:
-//   1. counts recent Reddit mentions (real Reddit API, OAuth2 client-credentials)
-//   2. fetches the current price + a short history (Stooq, no API key needed)
+// Each run it:
+//   1. discovers which tickers are CURRENTLY trending on Reddit by scanning
+//      hot posts for cashtags / ticker-shaped words (no fixed ticker list —
+//      the watchlist is reseeded with whatever is hot right now)
+//   2. counts recent mentions for each candidate (real Reddit API, OAuth2)
+//      and fetches its price + short history (Stooq, no API key needed)
 //   3. classifies the signal as organic / spike / pure-hype
 //   4. applies the pump-&-dip trading strategy and logs every trade
 //   5. records a portfolio balance snapshot for the chart
+//
+// Tickers with an open position are always re-evaluated (so we can sell even
+// if they fall out of the "currently trending" set), everything else is
+// rotated in/out of `watchlist.active` based on what's hot this run.
 //
 // Required secrets (set with `supabase secrets set`):
 //   REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET — from a "script" app at
@@ -26,9 +33,34 @@ const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 const REDDIT_SUBREDDITS = ['stocks', 'wallstreetbets', 'investing'];
 const HISTORY_LOOKBACK = 8; // how many past signal rows to use for the hype baseline
 
+// ── Dynamic ticker discovery ─────────────────────────────────────────────
+const DISCOVERY_POST_LIMIT = 75; // hot posts scanned per subreddit for candidates
+const CANDIDATE_POOL_SIZE = 25; // top mention-ranked candidates to validate against Stooq
+const HOT_LIST_SIZE = 10; // how many validated tickers make the active watchlist
+
+const CASHTAG_RE = /\$([A-Z]{1,5})\b/g;
+const CAPS_WORD_RE = /\b([A-Z]{2,5})\b/g;
+
+// Common acronyms/slang that look like tickers but aren't — without this,
+// "DD", "YOLO", "CEO" etc. would constantly crowd out real symbols.
+const TICKER_STOPWORDS = new Set([
+  'YOLO', 'DD', 'CEO', 'CFO', 'CTO', 'COO', 'IPO', 'ATH', 'ETF', 'USA', 'USD',
+  'EOD', 'FOMO', 'FUD', 'IMO', 'IMHO', 'LOL', 'WSB', 'SEC', 'FED', 'GDP', 'CPI',
+  'AI', 'IT', 'OK', 'ETC', 'AKA', 'FAQ', 'TLDR', 'PSA', 'RIP', 'PM', 'AM',
+  'NYSE', 'OTC', 'EPS', 'ROI', 'YTD', 'QOQ', 'YOY', 'API', 'NFT', 'AMA', 'GG',
+  'WTF', 'SPAC', 'PE', 'VC', 'IRS', 'HQ', 'US', 'UK', 'EU', 'ATM', 'BTFD', 'FD',
+  'OTM', 'ITM', 'DTE', 'IV', 'TA', 'FA', 'ER', 'EDIT', 'TIL', 'ELI5', 'FYI',
+  'NVM', 'IDK', 'TBH', 'SO', 'TO', 'OF', 'IN', 'ON', 'AT', 'BY', 'IS', 'BE',
+  'DO', 'GO', 'NO', 'UP', 'MY', 'ME', 'WE', 'HE', 'ALL', 'NEW', 'OLD', 'BUY',
+  'SELL', 'HOLD', 'CALL', 'CALLS', 'PUT', 'PUTS', 'MOON', 'BEAR', 'BULL',
+  'RED', 'GREEN', 'LONG', 'SHORT', 'CASH', 'YES', 'NOT', 'ONE', 'TWO', 'NOW',
+  'CAN', 'GET', 'GOT', 'WHO', 'WHY', 'HOW', 'OUR', 'OUT', 'ANY', 'ARE', 'AND',
+]);
+
 interface WatchlistRow {
   ticker: string;
-  name: string;
+  name: string | null;
+  active: boolean;
 }
 
 interface SignalRow {
@@ -120,6 +152,47 @@ async function countRedditMentions(token: string, ticker: string): Promise<numbe
   return total;
 }
 
+/** Scans hot posts across the watched subreddits and extracts ticker-shaped
+ * symbols (cashtags like "$NVDA" score higher than bare all-caps words like
+ * "NVDA", since cashtags are an explicit, low-noise signal). Returns a score
+ * per discovered symbol, highest first. */
+async function discoverTrendingTickers(token: string): Promise<[string, number][]> {
+  const scores = new Map<string, number>();
+  for (const subreddit of REDDIT_SUBREDDITS) {
+    const url = `https://oauth.reddit.com/r/${subreddit}/hot?limit=${DISCOVERY_POST_LIMIT}`;
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'User-Agent': 'reddit-stocks-market-scan/1.0',
+      },
+    });
+    if (!res.ok) {
+      console.warn(`Reddit hot listing failed for r/${subreddit}: ${res.status}`);
+      continue;
+    }
+    const data = await res.json();
+    const posts: any[] = data?.data?.children ?? [];
+    for (const post of posts) {
+      const text = `${post?.data?.title ?? ''} ${post?.data?.selftext ?? ''}`;
+      const seenInPost = new Set<string>();
+
+      for (const match of text.matchAll(CASHTAG_RE)) {
+        const symbol = match[1].toUpperCase();
+        if (TICKER_STOPWORDS.has(symbol) || seenInPost.has(symbol)) continue;
+        seenInPost.add(symbol);
+        scores.set(symbol, (scores.get(symbol) ?? 0) + 2);
+      }
+      for (const match of text.matchAll(CAPS_WORD_RE)) {
+        const symbol = match[1].toUpperCase();
+        if (TICKER_STOPWORDS.has(symbol) || seenInPost.has(symbol)) continue;
+        seenInPost.add(symbol);
+        scores.set(symbol, (scores.get(symbol) ?? 0) + 1);
+      }
+    }
+  }
+  return [...scores.entries()].sort((a, b) => b[1] - a[1]);
+}
+
 // ── Prices: Stooq daily CSV, no API key required ─────────────────────────
 async function fetchPriceHistory(ticker: string): Promise<number[]> {
   const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(ticker.toLowerCase())}.us&i=d`;
@@ -193,12 +266,6 @@ Deno.serve(async () => {
 
   const log: string[] = [];
   try {
-    const { data: watchlist, error: watchlistError } = await supabase
-      .from('watchlist')
-      .select('ticker, name')
-      .eq('active', true);
-    if (watchlistError) throw watchlistError;
-
     const { data: portfolioRow, error: portfolioError } = await supabase
       .from('portfolio')
       .select('*')
@@ -212,16 +279,75 @@ Deno.serve(async () => {
       .select('*');
     if (positionsError) throw positionsError;
     const positions = (openPositions ?? []) as PositionRow[];
+    const positionTickers = new Set(positions.map((p) => p.ticker));
 
     const redditToken = await getRedditToken();
     const latestPrices = new Map<string, number>();
 
-    for (const stock of (watchlist ?? []) as WatchlistRow[]) {
-      const { ticker } = stock;
+    // ── Phase 1: discover what's currently trending on Reddit ───────────
+    // No fixed ticker list — rank candidate symbols by mention weight, then
+    // validate each against Stooq (real ticker + has price data) until the
+    // hot list is full. This naturally filters out slang that slipped past
+    // the stopword list (e.g. invented acronyms with no matching security).
+    const ranked = await discoverTrendingTickers(redditToken);
+    const hotPriceHistory = new Map<string, number[]>();
+    for (const [symbol] of ranked.slice(0, CANDIDATE_POOL_SIZE)) {
+      if (hotPriceHistory.size >= HOT_LIST_SIZE) break;
+      if (hotPriceHistory.has(symbol)) continue;
+      try {
+        const history = await fetchPriceHistory(symbol);
+        if (history.length > 0) {
+          hotPriceHistory.set(symbol, history);
+        }
+      } catch {
+        // Not a real/listed ticker (or Stooq has nothing for it) — skip.
+      }
+    }
+    log.push(`Entdeckt & validiert: ${[...hotPriceHistory.keys()].join(', ') || '(keine)'}`);
 
-      const [mentionCount, priceHistory, { data: history }] = await Promise.all([
+    // ── Phase 2: sync the watchlist table with the hot list ─────────────
+    // Tickers with an open position stay evaluable even if they've cooled
+    // off (so we can still react to take-profit/stop-loss), but only the
+    // hot list counts as "active" for new buys.
+    const { data: existingWatchlist, error: watchlistError } = await supabase
+      .from('watchlist')
+      .select('ticker, name, active');
+    if (watchlistError) throw watchlistError;
+    const existingByTicker = new Map(
+      ((existingWatchlist ?? []) as WatchlistRow[]).map((w) => [w.ticker, w]),
+    );
+
+    for (const ticker of hotPriceHistory.keys()) {
+      const existing = existingByTicker.get(ticker);
+      if (!existing) {
+        await supabase.from('watchlist').insert({ ticker, active: true });
+        log.push(`${ticker}: neu entdeckt und zur Watchlist hinzugefügt.`);
+      } else if (!existing.active) {
+        await supabase.from('watchlist').update({ active: true }).eq('ticker', ticker);
+      }
+    }
+    for (const [ticker, watch] of existingByTicker) {
+      if (watch.active && !hotPriceHistory.has(ticker) && !positionTickers.has(ticker)) {
+        await supabase.from('watchlist').update({ active: false }).eq('ticker', ticker);
+        log.push(`${ticker}: nicht mehr unter den Top-Trends, aus aktiver Watchlist entfernt.`);
+      }
+    }
+
+    // ── Phase 3: evaluate every hot ticker plus anything we still hold ──
+    const evaluationSet = new Map<string, number[]>(hotPriceHistory);
+    for (const ticker of positionTickers) {
+      if (!evaluationSet.has(ticker)) {
+        try {
+          evaluationSet.set(ticker, await fetchPriceHistory(ticker));
+        } catch {
+          evaluationSet.set(ticker, []);
+        }
+      }
+    }
+
+    for (const [ticker, priceHistory] of evaluationSet) {
+      const [mentionCount, { data: history }] = await Promise.all([
         countRedditMentions(redditToken, ticker),
-        fetchPriceHistory(ticker),
         supabase
           .from('signals')
           .select('ticker, scanned_at, price, mention_count, hype_score')

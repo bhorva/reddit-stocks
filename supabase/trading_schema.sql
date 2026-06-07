@@ -7,13 +7,22 @@
 -- the service-role key, which bypasses RLS). The public "anon" key can read
 -- but never write — the simulation must not be tamperable from the browser.
 
--- ── Watchlist: tickers that the scan evaluates each run ──────────────────
+-- ── Watchlist: tickers the scan currently considers "hot" ────────────────
+-- This table is fully dynamic: each run extracts ticker symbols straight out
+-- of trending Reddit posts (cashtags + validated all-caps words), so it is
+-- reseeded with whatever the engine discovers — `name` is therefore optional
+-- (only known for the seed rows below) and `active` reflects whether a ticker
+-- made the current top-N "hot" cut (or still has an open position).
 create table if not exists public.watchlist (
-  ticker  text    primary key,
-  name    text    not null,
-  active  boolean not null default true
+  ticker         text        primary key,
+  name           text,
+  active         boolean     not null default true,
+  discovered_at  timestamptz not null default now()
 );
 
+-- Bootstrap rows so the dashboard isn't empty before the first scan. The
+-- engine will mark these inactive (and add/replace others) the moment they
+-- stop showing up among the currently-trending tickers it discovers.
 insert into public.watchlist (ticker, name) values
   ('RDDT', 'Reddit Inc.'),
   ('NVDA', 'NVIDIA Corp.'),
