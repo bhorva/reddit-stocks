@@ -1,0 +1,14 @@
+# Dependencies
+/node_modules
+
+# Build output
+/dist
+/out-tsc
+/.angular
+
+# Runtime secrets config (generated at build / created locally)
+/public/config.js
+
+# Editor / OS
+.DS_Store
+*.log
