@@ -223,6 +223,14 @@ const HOT_LIST_SIZE = 14; // how many validated tickers make the active watchlis
 // mechanisms for two separate jobs: this list keeps watchlist slots focused
 // on tickers worth evaluating at all; the `is_etf` gate is the safety net
 // that holds regardless of which tickers make it onto that list.
+//
+// SECONDARY USE — static `is_etf` backfill safety net (see the
+// `staleEtfTickers` block in the watchlist-sync phase below): every entry
+// here is, by definition, a hand-confirmed real ETF, which makes this list
+// dual-purpose as an authoritative override for legacy rows that the normal
+// Yahoo-driven backfill can structurally never reach (because THIS VERY
+// FILTER keeps them from ever being re-evaluated again — see that block's
+// comment for the full chain of reasoning).
 const BROAD_MARKET_ETFS = new Set([
   'SPY', 'QQQ', 'VOO', 'VTI', 'IVV', 'DIA', 'IWM', 'VEA', 'VUG', 'VTV',
   'ARKK', 'XLF', 'XLK', 'XLE', 'XLV', 'XLY', 'XLI', 'XLP', 'XLU', 'SPX',
@@ -934,6 +942,40 @@ Deno.serve(async () => {
     const existingByTicker = new Map(
       ((existingWatchlist ?? []) as WatchlistRow[]).map((w) => [w.ticker, w]),
     );
+
+    // Static safety net for `is_etf` on well-known broad-market/sector ETFs —
+    // closes a real "stuck at null forever" gap that the opportunistic
+    // Yahoo-driven backfill below cannot reach on its own:
+    //
+    //   `BROAD_MARKET_ETFS` tickers are filtered OUT at discovery (see that
+    //   constant's comment), so a legacy row like SPY/QQQ/VOO — discovered
+    //   back before that filter existed — is `active = false`, has no open
+    //   position, and therefore never lands in `instrumentInfoByTicker`
+    //   (which only ever covers `hotPriceHistory` ∪ `positionTickers`). The
+    //   per-ticker backfill loop a few dozen lines down can only patch rows
+    //   it has a fresh Yahoo read for — so these specific rows would sit at
+    //   `is_etf: null` ("we don't know yet") indefinitely, even though we
+    //   very much DO know: that's the entire reason they're on this list.
+    //
+    //   (For the record: Yahoo's own `instrumentType` actually classifies
+    //   both correctly as "ETF" too — verified live — so this isn't working
+    //   around bad upstream data either. It's purely an "this row can never
+    //   be reached by the normal path" problem, and a one-line direct UPDATE
+    //   from data we already hand-curated and trust is the simplest fix —
+    //   no extra Yahoo Finance call, no expansion of what gets evaluated.)
+    const staleEtfTickers = [...existingByTicker.values()]
+      .filter((w) => w.is_etf === null && BROAD_MARKET_ETFS.has(w.ticker))
+      .map((w) => w.ticker);
+    if (staleEtfTickers.length > 0) {
+      await supabase.from('watchlist').update({ is_etf: true }).in('ticker', staleEtfTickers);
+      for (const ticker of staleEtfTickers) {
+        existingByTicker.get(ticker)!.is_etf = true; // keep in-memory copy consistent for the rest of this run
+      }
+      log.push(
+        `${staleEtfTickers.join(', ')}: nachträglich als ETF eingestuft (bekannte Index-/Sektor-ETFs, ` +
+          `seit der BROAD_MARKET_ETFS-Filterung nicht mehr neu bewertet — siehe Kommentar im Code).`,
+      );
+    }
 
     for (const ticker of hotPriceHistory.keys()) {
       const existing = existingByTicker.get(ticker);
