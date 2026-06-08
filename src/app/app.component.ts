@@ -1,13 +1,12 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { SupabaseService, StockRow } from './supabase.service';
 import { TradingDashboardComponent } from './trading-dashboard.component';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, FormsModule, TradingDashboardComponent],
+  imports: [CommonModule, TradingDashboardComponent],
   template: `
     <main class="container">
       <h1>Reddit Stocks</h1>
@@ -23,26 +22,11 @@ import { TradingDashboardComponent } from './trading-dashboard.component';
           </p>
         </div>
       } @else {
-        <form class="row" (ngSubmit)="add()">
-          <input
-            name="ticker"
-            [(ngModel)]="ticker"
-            placeholder="Ticker, z. B. GME"
-            maxlength="10"
-            required
-          />
-          <input
-            name="mentions"
-            type="number"
-            [(ngModel)]="mentions"
-            placeholder="Erwähnungen"
-            min="0"
-          />
-          <button type="submit" [disabled]="busy()">Hinzufügen</button>
+        <div class="row">
           <button type="button" (click)="reload()" [disabled]="busy()">
             Neu laden
           </button>
-        </form>
+        </div>
 
         @if (error()) {
           <div class="error">{{ error() }}</div>
@@ -155,9 +139,6 @@ import { TradingDashboardComponent } from './trading-dashboard.component';
 export class AppComponent implements OnInit {
   protected readonly supabase = inject(SupabaseService);
 
-  protected ticker = '';
-  protected mentions: number | null = null;
-
   protected readonly stocks = signal<StockRow[]>([]);
   protected readonly busy = signal(false);
   protected readonly error = signal<string | null>(null);
@@ -176,24 +157,6 @@ export class AppComponent implements OnInit {
     } catch (e) {
       this.error.set(this.toMessage(e));
     } finally {
-      this.busy.set(false);
-    }
-  }
-
-  async add(): Promise<void> {
-    const ticker = this.ticker.trim().toUpperCase();
-    if (!ticker) {
-      return;
-    }
-    this.busy.set(true);
-    this.error.set(null);
-    try {
-      await this.supabase.addStock(ticker, this.mentions ?? 0);
-      this.ticker = '';
-      this.mentions = null;
-      await this.reload();
-    } catch (e) {
-      this.error.set(this.toMessage(e));
       this.busy.set(false);
     }
   }

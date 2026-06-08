@@ -87,14 +87,23 @@ Erst wenn Erwähnungs-Spitzen, Stimmung **und** Kursverlauf übereinstimmend
 „organisch" aussehen, gilt ein Ticker als handelbar — eine einzelne, laute
 Quelle kann die Simulation nicht in einen Trade treiben.
 
+**Portfolio-Wert bleibt aktuell**: Eine zweite, bewusst sehr schlanke Function
+(`supabase/functions/price-refresh`) läuft per eigenem `pg_cron`-Job alle 30
+Minuten, bepreist offene Positionen neu, löst Take-Profit/Stop-Loss-Exits ggf.
+schon zwischen den vollen 6h-Scans aus und schreibt einen frischen
+`balance_history`-Snapshot. So zeigt das Dashboard durchgehend den aktuellen
+Wert, ohne dass dafür der teure Discovery-Scan (mehrere externe APIs,
+Klassifikation, ggf. neue Käufe) öfter laufen müsste.
+
 Einmaliges Setup:
 
 1. **Tabellen anlegen**: [`supabase/trading_schema.sql`](supabase/trading_schema.sql)
    im Supabase SQL-Editor ausführen (legt Tabellen, Policies und eine
    Beispiel-Watchlist an).
-2. **Function deployen**:
+2. **Functions deployen**:
    ```bash
    supabase functions deploy market-scan
+   supabase functions deploy price-refresh
    ```
    Eine Reddit-App-Registrierung ist **nicht nötig**: Reddit hat die
    selbstständige Erstellung von OAuth-Zugangsdaten Ende 2025 eingestellt
@@ -105,8 +114,10 @@ Einmaliges Setup:
    einem aussagekräftigen `User-Agent`-Header frei lesbar bleiben — völlig
    ausreichend für einen 6-stündlichen Scan dreier Subreddits.
 3. **Cron aktivieren**: die Schritte am Ende von `supabase/trading_schema.sql`
-   ausführen (Extensions `pg_cron`/`pg_net` aktivieren, Function-URL und
-   Service-Role-Key im Vault hinterlegen, Job mit `cron.schedule(...)` anlegen).
+   ausführen (Extensions `pg_cron`/`pg_net` aktivieren, Function-URLs und
+   Service-Role-Key im Vault hinterlegen, je einen Job für `market-scan`
+   [alle 6h, Discovery & Trading] und `price-refresh` [alle 30 Minuten,
+   Neubewertung offener Positionen] mit `cron.schedule(...)` anlegen).
 
 Das Frontend liest die Ergebnisse nur lesend (`anon`-Key, RLS erlaubt keine
 Schreibzugriffe von dort) — gehandelt wird ausschliesslich serverseitig.

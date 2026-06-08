@@ -170,3 +170,35 @@ create policy "Public read access" on public.balance_history for select using (t
 -- To inspect or remove the schedule later:
 --      select * from cron.job;
 --      select cron.unschedule('market-scan-every-6h');
+
+-- ── Cron #2: keep the portfolio value current between full scans ─────────
+-- `market-scan` only runs every 6h and does the expensive discovery work.
+-- `price-refresh` is a small companion function that just re-prices OPEN
+-- positions, fires take-profit/stop-loss exits early if triggered, and writes
+-- a fresh `balance_history` snapshot — so the dashboard reflects the
+-- portfolio's current value continuously, not just every 6 hours. It reuses
+-- the SAME Vault secrets (`service_role_key`); only the URL differs.
+--
+-- 1. Deploy it once: supabase functions deploy price-refresh
+--
+-- 2. Schedule it to run every 30 minutes (adjust to taste — see README for
+--    the trade-offs of a tighter interval):
+--
+--      select cron.schedule(
+--        'price-refresh-every-30min',
+--        '*/30 * * * *',
+--        $$
+--        select net.http_post(
+--          url     := 'https://YOUR-PROJECT-REF.supabase.co/functions/v1/price-refresh',
+--          headers := jsonb_build_object(
+--            'Content-Type',  'application/json',
+--            'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'service_role_key')
+--          ),
+--          body    := '{}'::jsonb
+--        );
+--        $$
+--      );
+--
+-- To inspect or remove this schedule later:
+--      select * from cron.job;
+--      select cron.unschedule('price-refresh-every-30min');

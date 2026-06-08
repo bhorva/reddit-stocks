@@ -9,6 +9,9 @@
 # Runtime secrets config (generated at build / created locally)
 /public/config.js
 
+# Supabase CLI local cache/state (created when running `supabase` commands)
+/supabase/.temp
+
 # Editor / OS
 .DS_Store
 *.log
