@@ -22,16 +22,21 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 
 // Kept in sync with `market-scan` — see the detailed strategy-constants
-// comment there for the full reasoning. Short version: Swissquote's ~6.3%
+// comment there for the full reasoning. Short version: Swissquote's
 // round-trip cost (brokerage + FX margin, EACH WAY) hits every exit, win or
 // lose, so single-digit-percent thresholds (the original ±2.5%/±4% pump-&-dip
 // shape, and even the later ±8%/±3.5% iteration) make the strategy
 // structurally unprofitable — e.g. ±8%/±3.5% nets roughly +1.7% on wins vs.
 // -9.8% on losses, requiring an ~85% hit rate just to break even. The
-// strategy is now SWING-shaped instead (days-to-weeks holds, larger targets),
-// which keeps that ~6.3% tax a small fraction of the targeted move:
-//   net win  ≈ 0.20 - 0.063 ≈ +13.7%   net loss ≈ -0.06 - 0.063 ≈ -12.3%
-//   → breakeven hit rate ≈ 47%, a realistic bar for a heuristic with an edge.
+// strategy is now SWING-shaped instead (days-to-weeks holds, larger targets)
+// AND sized in fewer/larger positions (POSITION_SIZE 0.12 → 0.24, MAX_
+// POSITIONS 5 → 3 — see `market-scan` for why), both of which shrink that
+// near-fixed brokerage tax to a small fraction of the targeted move:
+//   round-trip tax ≈ 4.4%  (≈30 CHF commission + ~0.95% FX margin, EACH WAY,
+//                           on a ~24%-of-portfolio / ~2'400 CHF position)
+//   net win  ≈ 0.20 - 0.044 ≈ +15.6%   net loss ≈ -0.06 - 0.044 ≈ -10.4%
+//   → breakeven hit rate ≈ 40%, a comfortably realistic bar for a heuristic
+//     with a genuine, if modest, edge.
 const TAKE_PROFIT = 0.2;
 const STOP_LOSS = -0.06;
 

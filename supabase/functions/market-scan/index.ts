@@ -65,12 +65,25 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 //
 // So the strategy is now modelled as SWING trading: fewer, larger moves over
 // days-to-weeks rather than many small reactions every few hours. That makes
-// the ~6.3% round-trip tax a much smaller fraction of the targeted move, and
+// the round-trip tax a much smaller fraction of the targeted move, and
 // brings the breakeven hit rate down to something a genuine (if modest) edge
 // can plausibly clear — see the math at TAKE_PROFIT/STOP_LOSS below. Exits
 // are still checked every ~6h here and every ~15-30min by `price-refresh`,
 // so a swing target is never "missed" for lack of looking.
-const POSITION_SIZE = 0.12; // fraction of total portfolio value per buy
+//
+// One more lever on that same tax, pulled more recently: POSITION_SIZE grew
+// from 0.12 to 0.24 (and MAX_POSITIONS shrank from 5 to 3 to compensate, so
+// the portfolio doesn't end up over-invested). Swissquote's brokerage
+// commission is a near-FLAT fee per trade (see swissquoteFee() below), so
+// doubling the position size roughly HALVES its percentage bite — a ~1'200
+// CHF position pays ~25 CHF (≈2.1%), a ~2'400 CHF one pays ~30 CHF (≈1.25%).
+// That alone trims the round-trip tax from ~6.3% to ~4.4% — see the updated
+// math at TAKE_PROFIT/STOP_LOSS below. The cost is fewer, larger bets (less
+// diversification, more concentration risk per pick — see the "Kapital-
+// verteilung" card on the dashboard), but with ~10k CHF of simulated capital
+// and a realistically low swing-trading cadence (a handful of trades a week,
+// at most), the fixed-cost drag was the more pressing of the two problems.
+const POSITION_SIZE = 0.24; // fraction of total portfolio value per buy — raised from 0.12, see comment above
 
 // A swing entry wants a real pullback into a base, not a blip that fully
 // reverts before the next scan even looks at it — -2.5% is noise on a
@@ -80,22 +93,33 @@ const POSITION_SIZE = 0.12; // fraction of total portfolio value per buy
 // hour."
 const DIP_THRESH = -0.04; // buy once price has dropped this much from its recent (multi-week) high
 
-// TAKE_PROFIT / STOP_LOSS sized for SWING trades. The ~6.3% round-trip tax
-// (≈25 CHF Swissquote commission + ~0.95% FX margin EACH WAY on a ~12%-of-
-// portfolio position) hits every exit, win or lose — so what matters isn't
-// "does the winning side clear it" but how it reshapes BOTH sides:
+// TAKE_PROFIT / STOP_LOSS sized for SWING trades. The round-trip tax (≈30 CHF
+// Swissquote commission + ~0.95% FX margin EACH WAY on a ~24%-of-portfolio
+// position, ≈2'400 CHF — see the POSITION_SIZE comment for why it's sized
+// this way now) hits every exit, win or lose — so what matters isn't "does
+// the winning side clear it" but how it reshapes BOTH sides:
 //
-//   net win  ≈ TAKE_PROFIT - 0.063  =  0.20 - 0.063  ≈ +13.7%
-//   net loss ≈ STOP_LOSS   - 0.063  = -0.06 - 0.063  ≈ -12.3%
-//   breakeven hit rate = |net loss| / (net win + |net loss|) ≈ 47%
+//   one-way cost ≈ 30/2400 + 0.0095   ≈ 1.25% + 0.95%  ≈  2.2%
+//   round-trip   ≈ 2 × one-way cost                    ≈  4.4%
+//   net win  ≈ TAKE_PROFIT - 0.044  =  0.20 - 0.044  ≈ +15.6%
+//   net loss ≈ STOP_LOSS   - 0.044  = -0.06 - 0.044  ≈ -10.4%
+//   breakeven hit rate = |net loss| / (net win + |net loss|) ≈ 40%
 //
-// ~47% is a realistic bar — a heuristic with a genuine, if modest, edge can
-// clear it — versus the ~85% the previous ±8%/±3.5% pair implied. The two
-// net outcomes are also now close to symmetric, so profitability isn't
-// hostage to an unrealistically lopsided hit rate in either direction.
+// ~40% is a comfortably realistic bar for a heuristic with a genuine, if
+// modest, edge to clear — an improvement on the already-reasonable ~47% the
+// previous (smaller-position) sizing implied, and a long way from the ~85%
+// the original ±8%/±3.5% pair would have demanded. The two net outcomes stay
+// close to symmetric too, so profitability isn't hostage to an unrealistically
+// lopsided hit rate in either direction.
 const TAKE_PROFIT = 0.20; // sell once a position gains this much
 const STOP_LOSS = -0.06; // sell once a position loses this much
-const MAX_POSITIONS = 5;
+
+// Trimmed from 5 to 3 alongside the POSITION_SIZE increase (0.12 → 0.24) —
+// see the comment there: fewer, larger slots in exchange for each trade's
+// near-flat brokerage commission costing a much smaller percentage. At 0.24
+// each, 3 slots cap invested capital at ~72% (vs. the previous 5 × 0.12 =
+// 60%), leaving a comparable cash buffer for fees/slippage/new candidates.
+const MAX_POSITIONS = 3;
 const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 
 // Currency-conversion spread Swissquote charges when trading USD-denominated
@@ -123,8 +147,39 @@ const FX_FEE_RATE = 0.0095;
 const HISTORY_LOOKBACK = 28; // how many past signal rows to use for the hype baseline
 
 // ── Dynamic ticker discovery ─────────────────────────────────────────────
-const CANDIDATE_POOL_SIZE = 25; // top mention-ranked candidates to validate against Yahoo Finance
-const HOT_LIST_SIZE = 10; // how many validated tickers make the active watchlist
+// Both nudged up (25→32 / 10→14): the 5-lens "organic" classification
+// (relative strength vs. SPY, volume confirmation, ...) is intentionally
+// strict, so a meaningfully larger candidate pool helps make sure enough
+// genuinely tradeable signals still surface — without loosening any
+// threshold to "find" them artificially. Kept moderate rather than doubled:
+// each extra candidate costs an extra Yahoo Finance + StockTwits + Reddit
+// round trip per scan, and the tail of a much longer list would mostly be
+// lower-conviction noise anyway.
+const CANDIDATE_POOL_SIZE = 32; // top mention-ranked candidates to validate against Yahoo Finance
+const HOT_LIST_SIZE = 14; // how many validated tickers make the active watchlist
+
+// Broad-market / sector index ETFs — excluded from discovery so they never
+// occupy a watchlist/hot-list slot, let alone get bought. They show up
+// constantly in r/stocks and r/wallstreetbets chatter, but for reasons that
+// have little to do with the ticker-specific "Reddit hype" pattern this
+// engine is built to detect:
+//   • Their mention spikes mostly track GENERAL market mood ("the market is
+//     choppy today"), not stock-specific pumping — the z-score/hype-score
+//     heuristic would mostly be reading market-wide noise as a signal.
+//   • The "relative strength vs. SPY" lens is close to meaningless for SPY
+//     itself and for anything tightly correlated with it (QQQ, VOO, ...) — by
+//     construction they can rarely show genuine stock-specific outperformance.
+//   • SPY doubles as this dashboard's BENCHMARK ("did the strategy actually
+//     beat simply holding the index?"). Trading it would mean comparing the
+//     strategy against itself while ALSO paying Swissquote's fees on top of
+//     the benchmark's own (zero) cost — strictly worse than just holding it.
+// Filtered at discovery time, not just at the buy check, so a slot that an
+// actual meme-stock candidate could have used isn't wasted on a ticker that
+// could never become a genuine "organic" buy in the first place.
+const BROAD_MARKET_ETFS = new Set([
+  'SPY', 'QQQ', 'VOO', 'VTI', 'IVV', 'DIA', 'IWM', 'VEA', 'VUG', 'VTV',
+  'ARKK', 'XLF', 'XLK', 'XLE', 'XLV', 'XLY', 'XLI', 'XLP', 'XLU', 'SPX',
+]);
 
 const CASHTAG_RE = /\$([A-Z]{1,5})\b/g;
 const CAPS_WORD_RE = /\b([A-Z]{2,5})\b/g;
@@ -716,7 +771,13 @@ Deno.serve(async () => {
     for (const [ticker, score] of supplementaryScores) {
       combinedScores.set(ticker, (combinedScores.get(ticker) ?? 0) + score);
     }
-    const ranked = [...combinedScores.entries()].sort((a, b) => b[1] - a[1]);
+    // Drop broad-market ETFs here — see BROAD_MARKET_ETFS — so they never
+    // claim a candidate-pool/hot-list slot a genuine meme-stock pick could
+    // have used, and so the watchlist stays focused on names this engine's
+    // hype heuristic can actually say something meaningful about.
+    const ranked = [...combinedScores.entries()]
+      .filter(([ticker]) => !BROAD_MARKET_ETFS.has(ticker))
+      .sort((a, b) => b[1] - a[1]);
 
     const hotPriceHistory = new Map<string, number[]>();
     for (const [symbol] of ranked.slice(0, CANDIDATE_POOL_SIZE)) {
