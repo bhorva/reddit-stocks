@@ -35,6 +35,31 @@ interface TradeMarkerMeta {
   reason: string;
 }
 
+/**
+ * A "Verpasste Chance" (`SignalRow` with `skipped_for_capacity = true`)
+ * paired with whatever the dashboard can tell about what happened to that
+ * ticker SINCE — derived purely by joining against `getWatchlistSignals()`
+ * (the latest signal per actively-watched ticker), which the dashboard loads
+ * anyway. No new fetching, no simulated counterfactual P&L — see
+ * `missedOpportunityViews` for why that's a deliberate choice, not a
+ * shortcut: a true "would it have hit take-profit or stop-loss first?"
+ * simulation needs day-by-day path-walking (a second trading engine, with
+ * all the same fidelity traps as the real one) for a payoff that's dwarfed
+ * by the noise at today's data volumes. This stays purely descriptive —
+ * "here's what the price actually did since" — and leaves the judgment to
+ * the human reading the table, exactly the "lightweight" shape that was
+ * chosen over a full shadow-simulation engine.
+ */
+interface MissedOpportunityView {
+  signal: SignalRow;
+  /** Latest known signal for this ticker — `null` if it fell off the watchlist since. */
+  latest: SignalRow | null;
+  /** True iff `signal` IS the latest known signal for its ticker — i.e. too little time has passed to say anything yet. */
+  isLatest: boolean;
+  /** `(latest.price - signal.price) / signal.price`, or `null` when there's nothing meaningful to compare against (`latest` missing or `isLatest`). */
+  changePct: number | null;
+}
+
 @Component({
   selector: 'app-trading-dashboard',
   standalone: true,
@@ -56,6 +81,18 @@ interface TradeMarkerMeta {
           Transaktionen
           @if (transactions().length > 0) {
             <span class="tab-count">{{ transactions().length }}</span>
+          }
+        </button>
+        <button
+          type="button"
+          class="tab"
+          [class.active]="activeTab() === 'missed'"
+          (click)="activeTab.set('missed')"
+          title="Fälle, in denen die Heuristik kaufen wollte (organischer Hype, Kurs ausreichend unter dem Mehrwochenhoch, Markt offen, keine bestehende Position) — aber alle 3 Positions-Plätze bereits belegt waren. Zeigt rein deskriptiv, was der Kurs seither gemacht hat; keine simulierte Performance-Bewertung (siehe Tab-Inhalt für die ausführliche Begründung, warum bewusst so und nicht als automatisierte Gegen-P&L-Simulation)."
+        >
+          Verpasste Chancen
+          @if (missedOpportunities().length > 0) {
+            <span class="tab-count">{{ missedOpportunities().length }}</span>
           }
         </button>
         <span
@@ -687,6 +724,124 @@ interface TradeMarkerMeta {
           }
         </div>
       </div>
+
+      <!--
+        "Verpasste Chancen": Antwort auf die Frage "übersieht unsere Heuristik
+        gute Trades, weil das Portfolio voll war?". Bewusst NICHT als
+        automatisierte Gegen-P&L-Simulation umgesetzt (siehe ausführliche
+        Begründung im info-icon-Tooltip unten und in MissedOpportunityView) —
+        eine pfadgetreue "hätte Take-Profit oder Stop-Loss zuerst gegriffen?"-
+        Simulation wäre faktisch eine zweite Handels-Engine nur für die
+        Analyse, mit allen Stolpersteinen der echten (Gebühren, FX-Kurse,
+        Handelszeiten) und einem Rauschen-zu-Signal-Verhältnis, das bei der
+        aktuellen Datenmenge schlechter wäre als bei den ohnehin schon mit
+        Vorsicht zu geniessenden v3/v5-Performance-Views. Stattdessen rein
+        deskriptiv: "hier ist, was der Kurs seither tatsächlich gemacht hat" —
+        durch reines Verknüpfen mit den ohnehin geladenen aktuellen
+        Watchlist-Signalen, ohne zusätzliche API-Aufrufe oder Cron-Jobs.
+      -->
+      <div [hidden]="activeTab() !== 'missed'" class="tx-wide">
+        <div class="card">
+          <h3>
+            Verpasste Chancen
+            <span
+              class="info-icon"
+              tabindex="0"
+              title="Hier landen Ticker, bei denen die Heuristik kaufen wollte — organischer Hype, Kurs ausreichend unter dem Mehrwochenhoch gefallen, Markt offen, noch keine eigene Position — aber alle 3 Positions-Plätze (MAX_POSITIONS) bereits belegt waren. Das ist die EINZIGE 'nicht gekauft'-Situation, die wirklich 'das System wollte handeln, konnte aber nicht' bedeutet (im Unterschied zu 'die Heuristik selbst sagte nein', was eine ganz andere Frage testet). Die Spalte 'Veränderung seither' vergleicht den Kurs von damals rein informativ mit dem aktuellsten bekannten Kurs aus der Watchlist — KEINE simulierte Performance-Bewertung mit Gebühren/FX/Take-Profit-Logik: eine pfadgetreue Simulation bräuchte praktisch eine zweite Handels-Engine, deren Ergebnisse bei der aktuellen Datenmenge ohnehin mit Vorsicht zu geniessen wären. Diese Tabelle überlässt die Interpretation bewusst dem menschlichen Auge.">ⓘ</span>
+          </h3>
+          @if (missedOpportunities().length === 0) {
+            <p class="muted">
+              Noch keine verpassten Chancen erfasst — entweder lief das Portfolio noch nie voll
+              (aktuell {{ positions().length }}/3 Positionen offen), oder es gab seit Einführung
+              dieser Auswertung schlicht noch keinen Fall, in dem die Heuristik bei voller Bank
+              kaufen wollte.
+            </p>
+          } @else {
+            <input
+              type="text"
+              class="table-filter"
+              placeholder="Nach Ticker filtern…"
+              [value]="missedFilter()"
+              (input)="missedFilter.set($any($event.target).value)"
+            />
+            @if (filteredMissedOpportunityViews().length === 0) {
+              <p class="muted">Kein Ticker passt zum Filter „{{ missedFilter() }}”.</p>
+            } @else {
+              <div class="tx-table-wrap">
+                <table class="tx-table">
+                  <colgroup>
+                    <col class="col-date" />
+                    <col class="col-ticker" />
+                    <col class="col-price" />
+                    <col class="col-shares" />
+                    <col class="col-shares" />
+                    <col class="col-pnl" />
+                    <col class="col-reason" />
+                  </colgroup>
+                  <thead>
+                    <tr>
+                      <th>Datum</th>
+                      <th>Ticker</th>
+                      <th>Kurs damals (USD)</th>
+                      <th>
+                        Dip
+                        <span class="info-icon" tabindex="0" title="Wie weit der Kurs zu diesem Zeitpunkt unter seinem Mehrwochenhoch lag — die Schwelle, ab der ein Swing-Einstieg überhaupt in Frage kommt (DIP_THRESH).">ⓘ</span>
+                      </th>
+                      <th>Hype</th>
+                      <th>
+                        Veränderung seither
+                        <span class="info-icon" tabindex="0" title="Rein informativer Vergleich mit dem aktuellsten bekannten Kurs aus der Watchlist — KEINE simulierte Trade-Performance (keine Gebühren, kein FX, keine Take-Profit/Stop-Loss-Logik). 'noch zu früh' = dieser Eintrag ist selbst der aktuellste bekannte Kurs für diesen Ticker. 'nicht mehr beobachtet' = der Ticker steht nicht mehr auf der aktiven Watchlist.">ⓘ</span>
+                      </th>
+                      <th>Begründung</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (m of filteredMissedOpportunityViews(); track m.signal.id) {
+                      <tr [title]="m.signal.reason">
+                        <td class="nowrap">{{ m.signal.scanned_at | date: 'dd.MM.yy HH:mm' }}</td>
+                        <td class="ticker">{{ m.signal.ticker }}</td>
+                        <td class="nowrap">{{ m.signal.price | number: '1.2-2' }}</td>
+                        <td class="nowrap">
+                          @if (m.signal.drop_from_high_pct !== null) {
+                            {{ m.signal.drop_from_high_pct | number: '1.1-1' }}%
+                          } @else {
+                            <span class="muted">—</span>
+                          }
+                        </td>
+                        <td>
+                          <div class="hype-bar-wrap">
+                            <div class="hype-bar-bg">
+                              <div
+                                class="hype-bar-fill"
+                                [style.width.%]="m.signal.hype_score"
+                                [style.background]="hypeColor(m.signal.hype_score)"
+                              ></div>
+                            </div>
+                            <span>{{ m.signal.hype_score | number: '1.0-0' }}</span>
+                          </div>
+                        </td>
+                        <td class="nowrap">
+                          @if (m.changePct !== null) {
+                            <span [class.pos]="m.changePct >= 0" [class.neg]="m.changePct < 0">
+                              {{ m.changePct >= 0 ? '+' : '' }}{{ m.changePct * 100 | number: '1.1-1' }}%
+                            </span>
+                            <span class="muted fee-fx-hint">({{ m.latest!.price | number: '1.2-2' }} USD)</span>
+                          } @else if (m.isLatest) {
+                            <span class="muted">noch zu früh</span>
+                          } @else {
+                            <span class="muted">nicht mehr beobachtet</span>
+                          }
+                        </td>
+                        <td class="tx-reason">{{ m.signal.reason }}</td>
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+            }
+          }
+        </div>
+      </div>
     }
   `,
   styles: [
@@ -923,7 +1078,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
 
   // Mirrors the constants in supabase/functions/market-scan/index.ts — shown
   // in the UI so it's clear at which thresholds a position would be closed.
-  protected readonly activeTab = signal<'overview' | 'transactions'>('overview');
+  protected readonly activeTab = signal<'overview' | 'transactions' | 'missed'>('overview');
 
   // Mirrors the constants in both Edge Functions — see market-scan's
   // strategy-constants comment for the full reasoning. Short version: with
@@ -950,6 +1105,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   protected readonly transactions = signal<TransactionRow[]>([]);
   protected readonly balanceHistory = signal<BalanceHistoryRow[]>([]);
   protected readonly signals = signal<SignalRow[]>([]);
+  protected readonly missedOpportunities = signal<SignalRow[]>([]);
   protected readonly lastScanAt = signal<string | null>(null);
   protected readonly verdictPerformance = signal<VerdictPerformanceRow[]>([]);
   protected readonly zScorePerformance = signal<ZScoreBucketPerformanceRow[]>([]);
@@ -1022,6 +1178,32 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       }
       return cmp * dir;
     });
+  });
+
+  // ── "Verpasste Chancen": Heuristik wollte kaufen, Portfolio war voll ────
+  protected readonly missedFilter = signal('');
+
+  /**
+   * Joins each "missed opportunity" with the latest known signal for its
+   * ticker (already loaded via `getWatchlistSignals` → `signals`) to derive
+   * a purely descriptive "what has the price done since?" — see
+   * `MissedOpportunityView` for why this stays descriptive rather than a
+   * simulated counterfactual P&L.
+   */
+  protected readonly missedOpportunityViews = computed<MissedOpportunityView[]>(() => {
+    const latestByTicker = new Map(this.signals().map((s) => [s.ticker, s] as const));
+    return this.missedOpportunities().map((signal) => {
+      const latest = latestByTicker.get(signal.ticker) ?? null;
+      const isLatest = latest !== null && latest.id === signal.id;
+      const changePct = latest !== null && !isLatest ? (latest.price - signal.price) / signal.price : null;
+      return { signal, latest, isLatest, changePct };
+    });
+  });
+
+  protected readonly filteredMissedOpportunityViews = computed(() => {
+    const term = this.missedFilter().trim().toUpperCase();
+    const rows = this.missedOpportunityViews();
+    return term ? rows.filter((r) => r.signal.ticker.toUpperCase().includes(term)) : rows;
   });
 
   /** "Organic" first, then "spike", then "blocked" — i.e. the order of decreasing tradeability. */
@@ -1119,6 +1301,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
         transactions,
         balanceHistory,
         signals,
+        missedOpportunities,
         lastScanAt,
         verdictPerformance,
         zScorePerformance,
@@ -1128,6 +1311,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
         this.trading.getTransactionLog(),
         this.trading.getBalanceHistory(),
         this.trading.getWatchlistSignals(),
+        this.trading.getMissedOpportunities(),
         this.trading.getLastScanTime(),
         this.trading.getVerdictPerformance(),
         this.trading.getZScoreBucketPerformance(),
@@ -1137,6 +1321,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       this.transactions.set(transactions);
       this.balanceHistory.set(balanceHistory);
       this.signals.set(signals);
+      this.missedOpportunities.set(missedOpportunities);
       this.lastScanAt.set(lastScanAt);
       this.verdictPerformance.set(verdictPerformance);
       this.zScorePerformance.set(zScorePerformance);

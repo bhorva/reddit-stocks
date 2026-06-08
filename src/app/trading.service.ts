@@ -116,6 +116,32 @@ export class TradingService {
   }
 
   /**
+   * Signals where the heuristic wanted to open a new position — verdict
+   * organic, dip threshold cleared, market open, no existing position in that
+   * ticker — but `MAX_POSITIONS` was already full (`skipped_for_capacity`,
+   * see `trading_schema_v6_missed_opportunities.sql`). The ONE "not bought"
+   * case that represents a genuine "the system wanted to act but the risk cap
+   * stopped it" situation, as opposed to "the heuristic itself said no" —
+   * which is why this is a narrow, separate query rather than a generic
+   * "everything that wasn't bought" dump (lumping those together would
+   * conflate two completely different questions, see the migration's comment
+   * for the full reasoning). Newest first, so the dashboard tab naturally
+   * surfaces the most recent — and therefore most "trackable" — misses.
+   */
+  async getMissedOpportunities(limit = 100): Promise<SignalRow[]> {
+    const { data, error } = await this.getClient()
+      .from('signals')
+      .select('*')
+      .eq('skipped_for_capacity', true)
+      .order('scanned_at', { ascending: false })
+      .limit(limit);
+    if (error) {
+      throw error;
+    }
+    return (data ?? []) as SignalRow[];
+  }
+
+  /**
    * Reads the `trade_outcomes_by_verdict` / `trade_outcomes_by_zscore_bucket`
    * views (see `trading_schema_v3_signal_performance_views.sql`) — they turn
    * the structured `signal_snapshot` data captured since the v2 migration into
@@ -265,4 +291,34 @@ export interface SignalRow {
   verdict: 'organic' | 'spike' | 'pure-hype';
   blocked: boolean;
   reason: string;
+  /**
+   * How far (in %, negative = below) the price had fallen from its recent
+   * (~6-week) high at the moment this signal was recorded — e.g. `-4.2` means
+   * "4.2% below its recent high". `null` for rows that predate the v6
+   * "Verpasste Chancen" migration (it was computed inline and discarded
+   * before then). See `TransactionRow.usd_chf_rate` for the analogous
+   * "null = predates this column" convention.
+   */
+  drop_from_high_pct: number | null;
+  /**
+   * True iff every condition for opening a new position here was met EXCEPT
+   * the `MAX_POSITIONS` capacity check — i.e. market open, no existing
+   * position in this ticker, verdict organic, dip threshold cleared. Mirrors
+   * the real buy-check in `market-scan/index.ts` minus the capacity gate.
+   * `false` (not `null`) for legacy rows — they simply predate this
+   * bookkeeping, which is the accurate "we don't know" state here (a boolean
+   * has no natural `null`-safe default that wouldn't misrepresent the row).
+   */
+  would_have_bought: boolean;
+  /**
+   * Narrows `would_have_bought` down to the one case worth reviewing: the
+   * heuristic wanted to buy and a full portfolio (`MAX_POSITIONS`) was the
+   * ONLY thing stopping it — a genuine "the system wanted to act but
+   * couldn't" miss, as opposed to "the heuristic itself said no". This is
+   * what `TradingService.getMissedOpportunities` filters on; see
+   * `trading_schema_v6_missed_opportunities.sql` for the full reasoning on
+   * why this distinction matters for any "would this have been profitable?"
+   * analysis. `false` for legacy rows, same convention as `would_have_bought`.
+   */
+  skipped_for_capacity: boolean;
 }

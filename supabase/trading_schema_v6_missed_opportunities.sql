@@ -1,0 +1,54 @@
+-- Migration v6 — run this in the Supabase SQL editor AFTER
+-- trading_schema_v5_fx_pnl_split.sql has been applied. Purely additive
+-- (ALTER TABLE ... ADD COLUMN IF NOT EXISTS) and safe to re-run.
+--
+-- WHY: the engine already logs a `signals` row for EVERY ticker it evaluates,
+-- bought or not — but it discards the very fields that would let you tell
+-- WHY a ticker wasn't bought. That's the difference between three very
+-- different situations, each answering a different question:
+--
+--   1. Verdict wasn't 'organic', or the price hadn't dropped far enough from
+--      its recent high — i.e. the HEURISTIC said "no". Tracking these tells
+--      you whether the classification/dip-threshold is too strict (leaving
+--      good trades on the table) or about right.
+--   2. Verdict was 'pure-hype' and the ticker got blocked outright — already
+--      covered by `blocked`/`blocked_count`/`blocked_capital`.
+--   3. The heuristic said "yes, buy this" — verdict organic, dip threshold
+--      cleared, market open, no existing position — but `MAX_POSITIONS` (3)
+--      was already full. A genuinely missed opportunity caused purely by the
+--      portfolio's risk cap, not by the heuristic being wrong.
+--
+-- Lumping all "not bought" tickers together (as a naive "would this have been
+-- profitable?" comparison would) conflates these three completely different
+-- questions and risks drawing the wrong lesson from the data. These columns
+-- let the new "Verpasste Chancen" dashboard tab — and any future analysis —
+-- isolate case 3 cleanly, which is the only one that represents a genuine
+-- "the system wanted to act but couldn't" situation worth reviewing.
+--
+-- New columns on `signals`:
+--   `drop_from_high_pct`   — how far (in %) the price had fallen from its
+--                            recent (~6-week) high at decision time. Was
+--                            computed inline and discarded before; now kept
+--                            so you can later tell "verdict was fine but the
+--                            dip wasn't deep enough" from "verdict wasn't
+--                            organic at all" for ANY signal row, not just buys.
+--   `would_have_bought`    — true iff every buy condition EXCEPT the
+--                            MAX_POSITIONS capacity check was satisfied
+--                            (market open, no existing position in this
+--                            ticker, verdict organic, dip threshold cleared).
+--                            Mirrors the real buy-check in market-scan/index.ts
+--                            minus the `positions.length < MAX_POSITIONS` gate.
+--   `skipped_for_capacity` — true iff `would_have_bought` AND the position
+--                            cap was the only thing stopping the trade. THIS
+--                            is "the genuinely missed opportunity" flag the
+--                            new tab filters on.
+--
+-- Nothing to backfill: existing rows simply get `drop_from_high_pct = null`
+-- and the two booleans default to `false` — accurately reflecting "we didn't
+-- record this distinction yet" rather than fabricating a retroactive guess
+-- (same reasoning as the v4/v5 migrations' null/1.0 defaults for legacy rows).
+
+alter table public.signals
+  add column if not exists drop_from_high_pct numeric,
+  add column if not exists would_have_bought boolean not null default false,
+  add column if not exists skipped_for_capacity boolean not null default false;

@@ -965,6 +965,19 @@ Deno.serve(async () => {
       const price = recentPrices[recentPrices.length - 1];
       latestPrices.set(ticker, price);
 
+      // Hoisted up from the buy-check below (where only this ran before) so
+      // EVERY evaluated ticker gets a `drop_from_high_pct` on its `signals`
+      // row — not just the ones that happened to qualify for a buy. Without
+      // that, you can't later tell "verdict wasn't organic" apart from
+      // "verdict was fine, but the dip wasn't deep enough" when reviewing
+      // tickers that weren't bought (see the "Verpasste Chancen" tab and
+      // trading_schema_v6_missed_opportunities.sql for why that distinction
+      // matters). Same reasoning applies to `position`: known from the start
+      // of the loop, no need to wait until the sell-check to look it up.
+      const position = positions.find((p) => p.ticker === ticker);
+      const recentHigh = Math.max(...dailyHistory);
+      const dropFromHigh = (price - recentHigh) / recentHigh;
+
       const {
         hypeScore,
         verdict,
@@ -978,6 +991,19 @@ Deno.serve(async () => {
         volumeRatio,
       } = classify(mentionCount, (history ?? []) as SignalRow[], dailyHistory, sentiment, benchmarkTrendPct, volumeProfile);
 
+      // ── "Verpasste Chancen" bookkeeping ──────────────────────────────────
+      // `wouldHaveBought` mirrors the real buy-check below MINUS the
+      // `positions.length < MAX_POSITIONS` capacity gate — i.e. "every other
+      // condition for opening a new position here was met". `skippedForCapacity`
+      // narrows that down to the one case worth reviewing later: the heuristic
+      // wanted to act and the ONLY thing that stopped it was a full portfolio.
+      // (Tickers we already hold, or where the verdict/dip didn't qualify, are
+      // deliberately excluded from `wouldHaveBought` — those aren't "missed
+      // opportunities" in the interesting sense, see
+      // trading_schema_v6_missed_opportunities.sql for the full reasoning.)
+      const wouldHaveBought = marketOpen && !position && verdict === 'organic' && dropFromHigh <= DIP_THRESH;
+      const skippedForCapacity = wouldHaveBought && positions.length >= MAX_POSITIONS;
+
       const { error: signalError } = await supabase.from('signals').insert({
         ticker,
         price,
@@ -986,6 +1012,9 @@ Deno.serve(async () => {
         verdict,
         blocked,
         reason,
+        drop_from_high_pct: Math.round(dropFromHigh * 1000) / 10,
+        would_have_bought: wouldHaveBought,
+        skipped_for_capacity: skippedForCapacity,
       });
       if (signalError) throw signalError;
       log.push(`${ticker}: ${verdict} (hype=${hypeScore.toFixed(0)}, mentions=${mentionCount}, price=${price})`);
@@ -997,7 +1026,8 @@ Deno.serve(async () => {
       }
 
       // ── Sell check: existing position hit take-profit or stop-loss ──
-      const position = positions.find((p) => p.ticker === ticker);
+      // (`position` is now hoisted above, alongside `dropFromHigh` — see the
+      // comment there for why both moved up.)
       if (position) {
         const change = (price - position.entry_price) / position.entry_price;
         const exitTriggered = change >= TAKE_PROFIT || change <= STOP_LOSS;
@@ -1103,8 +1133,8 @@ Deno.serve(async () => {
         // for an hour and fully revert by the next scan — not a base worth
         // swinging into.) `price` itself still comes from the freshest
         // intraday close (see above) — only the reference HIGH is long-range.
-        const recentHigh = Math.max(...dailyHistory);
-        const dropFromHigh = (price - recentHigh) / recentHigh;
+        // (`recentHigh`/`dropFromHigh` are now hoisted above, alongside
+        // `position` — see the comment there for why both moved up.)
         if (dropFromHigh <= DIP_THRESH) {
           // `cash` is CHF; open positions' mark-to-market value is computed
           // from USD prices — convert it to CHF before summing, otherwise
