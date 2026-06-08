@@ -279,15 +279,15 @@ Chart.register(...registerables);
       .grid-bot { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
       .grid-bot-single { grid-template-columns: 1fr; }
       .tx-wide {
-        width: 100vw;
+        position: relative;
+        left: 50%;
+        transform: translateX(-50%);
+        width: calc(100vw - 2rem);
         max-width: 1180px;
-        margin-left: calc(50% - 50vw);
-        margin-right: calc(50% - 50vw);
-        padding: 0 1rem;
         box-sizing: border-box;
       }
       @media (max-width: 1180px) {
-        .tx-wide { width: auto; max-width: none; margin-left: 0; margin-right: 0; padding: 0; }
+        .tx-wide { position: static; left: auto; transform: none; width: auto; max-width: none; }
       }
       @media (max-width: 900px) {
         .grid-top, .grid-mid, .grid-bot { grid-template-columns: 1fr; }
