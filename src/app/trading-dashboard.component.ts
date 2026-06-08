@@ -19,6 +19,7 @@ import {
   TradingService,
   TransactionRow,
   VerdictPerformanceRow,
+  WatchlistRow,
   ZScoreBucketPerformanceRow,
 } from './trading.service';
 
@@ -289,55 +290,81 @@ interface MissedOpportunityView {
               @if (sortedSignals().length === 0) {
                 <p class="muted">Kein Ticker passt zum Filter „{{ signalFilter() }}“.</p>
               } @else {
-              <table>
-                <thead>
-                  <tr>
-                    <th class="sortable" [class.sorted]="signalSortColumn() === 'ticker'" (click)="toggleSignalSort('ticker')">
-                      Ticker <span class="sort-indicator">{{ signalSortIndicator('ticker') }}</span>
-                    </th>
-                    <th class="sortable" [class.sorted]="signalSortColumn() === 'price'" (click)="toggleSignalSort('price')">
-                      Preis (USD) <span class="sort-indicator">{{ signalSortIndicator('price') }}</span>
-                    </th>
-                    <th class="sortable" [class.sorted]="signalSortColumn() === 'mention_count'" (click)="toggleSignalSort('mention_count')">
-                      Erwähnungen <span class="sort-indicator">{{ signalSortIndicator('mention_count') }}</span>
-                    </th>
-                    <th class="sortable" [class.sorted]="signalSortColumn() === 'hype_score'" (click)="toggleSignalSort('hype_score')">
-                      Hype <span class="sort-indicator">{{ signalSortIndicator('hype_score') }}</span>
-                      <span class="info-icon" tabindex="0" title="Misst, wie ungewöhnlich oft eine Aktie GERADE JETZT in Reddit/StockTwits erwähnt wird, verglichen mit ihrem üblichen Niveau (statistischer Z-Score, auf 0–100 skaliert). Hoch = aktuell viel Gerede — sagt für sich allein noch nichts darüber aus, ob das Gerede berechtigt ist (das entscheidet erst das 'Verdict'). Standard-Sortierung dieser Tabelle: absteigend nach Hype, weil das den 'lautesten' Tickern zuerst Aufmerksamkeit gibt.">ⓘ</span>
-                    </th>
-                    <th class="sortable" [class.sorted]="signalSortColumn() === 'verdict'" (click)="toggleSignalSort('verdict')">
-                      Verdict <span class="sort-indicator">{{ signalSortIndicator('verdict') }}</span>
-                      <span class="info-icon" tabindex="0" title="Versucht zu unterscheiden, ob ein Erwähnungs-Anstieg von echter Kursbewegung & Stimmung begleitet wird ('Organisch' = handelbar) oder nur heisse Luft ist ('Spike' = verdächtig, wird beobachtet aber nicht gehandelt; 'Geblockt' = als reiner Hype eingestuft, kein Trade). Sortierung ordnet nach Handelbarkeit: Organisch → Spike → Geblockt.">ⓘ</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  @for (s of sortedSignals(); track s.id) {
-                    <tr [title]="s.reason">
-                      <td class="ticker">{{ s.ticker }}</td>
-                      <td>{{ s.price | number: '1.2-2' }}</td>
-                      <td>{{ s.mention_count }}</td>
-                      <td>
-                        <div class="hype-bar-wrap">
-                          <div class="hype-bar-bg">
-                            <div
-                              class="hype-bar-fill"
-                              [style.width.%]="s.hype_score"
-                              [style.background]="hypeColor(s.hype_score)"
-                            ></div>
-                          </div>
-                          <span>{{ s.hype_score | number: '1.0-0' }}</span>
-                        </div>
-                      </td>
-                      <td><span class="badge" [class]="verdictClass(s)">{{ verdictLabel(s) }}</span></td>
-                    </tr>
-                  }
-                </tbody>
-              </table>
+                <h4 class="subsection-title">
+                  Aktien
+                  <span class="info-icon" tabindex="0" title="Einzelaktien — die einzigen Titel, die diese Engine kauft. 'Typ: ?' bedeutet: die Klassifikation (direkt von Yahoo Finance, nicht geraten) steht für diesen Ticker noch aus und folgt automatisch beim nächsten Scan, an dem er beteiligt ist.">ⓘ</span>
+                </h4>
+                @if (sortedStockSignals().length === 0) {
+                  <p class="muted">Keine Aktien passen zum Filter „{{ signalFilter() }}“.</p>
+                } @else {
+                  <ng-container [ngTemplateOutlet]="signalTable" [ngTemplateOutletContext]="{ rows: sortedStockSignals() }"></ng-container>
+                }
+                <h4 class="subsection-title">
+                  ETFs
+                  <span class="info-icon" tabindex="0" title="ETFs werden hier separat ausgewiesen, aber NICHT gehandelt: die Engine verweigert den Kauf jedes Tickers, den Yahoo Finance selbst als ETF klassifiziert (instrumentType = 'ETF') — unabhängig davon, ob er zufällig die 'Organisch'-Heuristik erfüllen würde. Sie tauchen trotzdem in der Watchlist auf, weil ein paar breite Index-ETFs (SPY, QQQ, VOO) hier entdeckt wurden, BEVOR der Discovery-Filter dafür existierte; sie fallen mit der Zeit von selbst aus der aktiven Liste. Auch inhaltlich macht eine ETF-Bewertung über dieselbe Heuristik wenig Sinn — ihre Erwähnungs-Spitzen spiegeln eher die allgemeine Marktstimmung als ticker-spezifischen Hype, und SPY dient diesem Dashboard zugleich als Vergleichs-Benchmark.">ⓘ</span>
+                </h4>
+                @if (sortedEtfSignals().length === 0) {
+                  <p class="muted">Aktuell keine ETFs in der Watchlist.</p>
+                } @else {
+                  <ng-container [ngTemplateOutlet]="signalTable" [ngTemplateOutletContext]="{ rows: sortedEtfSignals() }"></ng-container>
+                }
               }
             }
           </div>
         </div>
+
+        <ng-template #signalTable let-rows="rows">
+          <table>
+            <thead>
+              <tr>
+                <th class="sortable" [class.sorted]="signalSortColumn() === 'ticker'" (click)="toggleSignalSort('ticker')">
+                  Ticker <span class="sort-indicator">{{ signalSortIndicator('ticker') }}</span>
+                </th>
+                <th>
+                  Typ
+                  <span class="info-icon" tabindex="0" title="Aktie/ETF, direkt von Yahoo Finance übernommen (meta.instrumentType) — keine Schätzung. '?' = für diesen Ticker noch nicht erfasst, wird beim nächsten Scan nachgetragen.">ⓘ</span>
+                </th>
+                <th class="sortable" [class.sorted]="signalSortColumn() === 'price'" (click)="toggleSignalSort('price')">
+                  Preis (USD) <span class="sort-indicator">{{ signalSortIndicator('price') }}</span>
+                </th>
+                <th class="sortable" [class.sorted]="signalSortColumn() === 'mention_count'" (click)="toggleSignalSort('mention_count')">
+                  Erwähnungen <span class="sort-indicator">{{ signalSortIndicator('mention_count') }}</span>
+                </th>
+                <th class="sortable" [class.sorted]="signalSortColumn() === 'hype_score'" (click)="toggleSignalSort('hype_score')">
+                  Hype <span class="sort-indicator">{{ signalSortIndicator('hype_score') }}</span>
+                  <span class="info-icon" tabindex="0" title="Misst, wie ungewöhnlich oft eine Aktie GERADE JETZT in Reddit/StockTwits erwähnt wird, verglichen mit ihrem üblichen Niveau (statistischer Z-Score, auf 0–100 skaliert). Hoch = aktuell viel Gerede — sagt für sich allein noch nichts darüber aus, ob das Gerede berechtigt ist (das entscheidet erst das 'Verdict'). Standard-Sortierung dieser Tabelle: absteigend nach Hype, weil das den 'lautesten' Tickern zuerst Aufmerksamkeit gibt.">ⓘ</span>
+                </th>
+                <th class="sortable" [class.sorted]="signalSortColumn() === 'verdict'" (click)="toggleSignalSort('verdict')">
+                  Verdict <span class="sort-indicator">{{ signalSortIndicator('verdict') }}</span>
+                  <span class="info-icon" tabindex="0" title="Versucht zu unterscheiden, ob ein Erwähnungs-Anstieg von echter Kursbewegung & Stimmung begleitet wird ('Organisch' = handelbar) oder nur heisse Luft ist ('Spike' = verdächtig, wird beobachtet aber nicht gehandelt; 'Geblockt' = als reiner Hype eingestuft, kein Trade). Sortierung ordnet nach Handelbarkeit: Organisch → Spike → Geblockt.">ⓘ</span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              @for (s of rows; track s.id) {
+                <tr [title]="s.reason">
+                  <td class="ticker">{{ s.ticker }}</td>
+                  <td><span class="badge" [class]="signalTypeClass(s)">{{ signalTypeLabel(s) }}</span></td>
+                  <td>{{ s.price | number: '1.2-2' }}</td>
+                  <td>{{ s.mention_count }}</td>
+                  <td>
+                    <div class="hype-bar-wrap">
+                      <div class="hype-bar-bg">
+                        <div
+                          class="hype-bar-fill"
+                          [style.width.%]="s.hype_score"
+                          [style.background]="hypeColor(s.hype_score)"
+                        ></div>
+                      </div>
+                      <span>{{ s.hype_score | number: '1.0-0' }}</span>
+                    </div>
+                  </td>
+                  <td><span class="badge" [class]="verdictClass(s)">{{ verdictLabel(s) }}</span></td>
+                </tr>
+              }
+            </tbody>
+          </table>
+        </ng-template>
 
         <div class="grid-mid grid-mid-reverse">
           <div class="card">
@@ -927,6 +954,10 @@ interface MissedOpportunityView {
       .badge-organic { background: #e6f6ea; color: #1a8a3c; }
       .badge-spike { background: #fff3e0; color: #c98a00; }
       .badge-blocked { background: #fde8e8; color: #c0392b; }
+      .badge-stock { background: #e8eef9; color: #2a5db0; }
+      .badge-etf { background: #f1e8fb; color: #7c3aed; }
+      .badge-unknown { background: #f0f0f0; color: #888; }
+      .subsection-title { margin: 18px 0 8px; font-size: 0.92rem; color: #555; font-weight: 600; }
       .hype-bar-wrap { display: flex; align-items: center; gap: 6px; }
       .hype-bar-bg { flex: 1; background: #eee; border-radius: 4px; height: 6px; min-width: 50px; }
       .hype-bar-fill { height: 6px; border-radius: 4px; }
@@ -1105,7 +1136,22 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   protected readonly transactions = signal<TransactionRow[]>([]);
   protected readonly balanceHistory = signal<BalanceHistoryRow[]>([]);
   protected readonly signals = signal<SignalRow[]>([]);
+  protected readonly watchlist = signal<WatchlistRow[]>([]);
   protected readonly missedOpportunities = signal<SignalRow[]>([]);
+
+  /**
+   * Per-ticker "is this an ETF?" lookup — `is_etf` lives on `watchlist` (a
+   * per-ticker classification from Yahoo's own `instrumentType`, see
+   * trading_schema_v7_etf_flag.sql), not on `signals` (which is a per-scan
+   * measurement), so the "Watchlist & Signale" table joins the two by ticker
+   * to separate stocks from ETFs. `undefined` = ticker not in `watchlist`
+   * (shouldn't normally happen — every signal comes from a watched ticker —
+   * but handled defensively); `null` = known ticker, classification not yet
+   * backfilled (pre-v7 row the engine hasn't re-evaluated yet).
+   */
+  private readonly isEtfByTicker = computed(() => {
+    return new Map(this.watchlist().map((w) => [w.ticker, w.is_etf] as const));
+  });
   protected readonly lastScanAt = signal<string | null>(null);
   protected readonly verdictPerformance = signal<VerdictPerformanceRow[]>([]);
   protected readonly zScorePerformance = signal<ZScoreBucketPerformanceRow[]>([]);
@@ -1179,6 +1225,27 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       return cmp * dir;
     });
   });
+
+  /**
+   * Splits the (already filtered + sorted) watchlist by `is_etf` so stocks
+   * and ETFs render as two separate tables — the user explicitly asked for
+   * this separation, and it also makes the "we don't actually trade ETFs"
+   * fact visible rather than just asserted: ETFs are clearly set apart, not
+   * interleaved with the tickers the engine can actually buy.
+   *
+   * `null`/`undefined` (not yet classified, see `isEtfByTicker`) land in the
+   * "Aktien" group, not a third "unknown" one — overwhelmingly the safer
+   * default (most watchlist tickers are, and always were, individual stocks;
+   * the only ETFs currently present predate the discovery filter that now
+   * keeps new ones out, see BROAD_MARKET_ETFS). The "Typ" column's '?' badge
+   * keeps that pending-classification state honestly visible regardless.
+   */
+  protected readonly sortedStockSignals = computed(() =>
+    this.sortedSignals().filter((s) => this.isEtfByTicker().get(s.ticker) !== true),
+  );
+  protected readonly sortedEtfSignals = computed(() =>
+    this.sortedSignals().filter((s) => this.isEtfByTicker().get(s.ticker) === true),
+  );
 
   // ── "Verpasste Chancen": Heuristik wollte kaufen, Portfolio war voll ────
   protected readonly missedFilter = signal('');
@@ -1301,6 +1368,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
         transactions,
         balanceHistory,
         signals,
+        watchlist,
         missedOpportunities,
         lastScanAt,
         verdictPerformance,
@@ -1311,6 +1379,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
         this.trading.getTransactionLog(),
         this.trading.getBalanceHistory(),
         this.trading.getWatchlistSignals(),
+        this.trading.getWatchlist(),
         this.trading.getMissedOpportunities(),
         this.trading.getLastScanTime(),
         this.trading.getVerdictPerformance(),
@@ -1321,6 +1390,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       this.transactions.set(transactions);
       this.balanceHistory.set(balanceHistory);
       this.signals.set(signals);
+      this.watchlist.set(watchlist);
       this.missedOpportunities.set(missedOpportunities);
       this.lastScanAt.set(lastScanAt);
       this.verdictPerformance.set(verdictPerformance);
@@ -1682,6 +1752,27 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     if (s.blocked) return 'badge badge-blocked';
     if (s.verdict === 'spike') return 'badge badge-spike';
     return 'badge badge-organic';
+  }
+
+  /**
+   * "Aktie" / "ETF" / "?" — driven by `watchlist.is_etf` (Yahoo's own
+   * `instrumentType`, see `isEtfByTicker`), NOT a guess. '?' specifically
+   * means "not yet (re-)evaluated since the v7 migration", which is why it's
+   * shown rather than silently defaulting to "Aktie" — the distinction matters
+   * for trusting the Aktien/ETF split above at a glance.
+   */
+  protected signalTypeLabel(s: SignalRow): string {
+    const isEtf = this.isEtfByTicker().get(s.ticker);
+    if (isEtf === true) return 'ETF';
+    if (isEtf === false) return 'Aktie';
+    return '?';
+  }
+
+  protected signalTypeClass(s: SignalRow): string {
+    const isEtf = this.isEtfByTicker().get(s.ticker);
+    if (isEtf === true) return 'badge badge-etf';
+    if (isEtf === false) return 'badge badge-stock';
+    return 'badge badge-unknown';
   }
 
   /**

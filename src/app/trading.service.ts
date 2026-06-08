@@ -96,6 +96,22 @@ export class TradingService {
     return (data as { scanned_at: string } | null)?.scanned_at ?? null;
   }
 
+  /**
+   * Raw `watchlist` rows — mainly needed for `is_etf` (see
+   * `trading_schema_v7_etf_flag.sql`), which lives on `watchlist` rather than
+   * `signals` because it's a per-ticker classification (Yahoo's own
+   * `instrumentType`), not a per-scan measurement. The dashboard joins this
+   * against `getWatchlistSignals()` by ticker to tell stocks and ETFs apart
+   * without the engine having to duplicate the flag onto every signal row.
+   */
+  async getWatchlist(): Promise<WatchlistRow[]> {
+    const { data, error } = await this.getClient().from('watchlist').select('*');
+    if (error) {
+      throw error;
+    }
+    return (data ?? []) as WatchlistRow[];
+  }
+
   /** Latest signal per watched ticker, newest scan first per ticker. */
   async getWatchlistSignals(): Promise<SignalRow[]> {
     const { data, error } = await this.getClient()
@@ -179,6 +195,31 @@ export interface PortfolioRow {
   blocked_count: number;
   blocked_capital: number;
   updated_at: string;
+}
+
+/**
+ * Row of `watchlist` — the set of tickers the engine currently watches (or
+ * once watched: `active = false` means it fell off the current "hot list" but
+ * is kept around for history/held-position re-evaluation).
+ */
+export interface WatchlistRow {
+  ticker: string;
+  name: string | null;
+  active: boolean;
+  /**
+   * `true`/`false` from Yahoo Finance's own `meta.instrumentType`
+   * ("ETF" vs "EQUITY") — fetched as a side effect of the price-history call
+   * the engine makes anyway (`fetchInstrumentInfo`, no extra request) and
+   * opportunistically backfilled onto every row it touches. `null` means
+   * "not yet (re-)evaluated since the v7 migration" — the honest "we don't
+   * know yet" state, not a fabricated guess (see
+   * trading_schema_v7_etf_flag.sql for the full reasoning, including why this
+   * is now ALSO a hard buy-time gate — closing the gap that the hand-curated
+   * `BROAD_MARKET_ETFS` discovery filter alone left open for non-broad-market
+   * ETFs like leveraged/thematic ones).
+   */
+  is_etf: boolean | null;
+  discovered_at: string;
 }
 
 export interface PositionRow {

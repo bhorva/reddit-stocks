@@ -206,6 +206,17 @@ const HOT_LIST_SIZE = 14; // how many validated tickers make the active watchlis
 // Filtered at discovery time, not just at the buy check, so a slot that an
 // actual meme-stock candidate could have used isn't wasted on a ticker that
 // could never become a genuine "organic" buy in the first place.
+//
+// NOTE: this is a DISCOVERY-time filter, not a buy-time guarantee — it's a
+// short hand-curated list of well-known broad-market/sector ETFs, and
+// leveraged/thematic ones (TQQQ, SOXL, ARKQ, ...) aren't on it. The actual
+// "never buy an ETF" guarantee lives in the buy check / `wouldHaveBought`
+// below (`instrumentInfoByTicker.get(ticker)?.isEtf !== true`), which is
+// grounded in Yahoo's own `instrumentType` classification — see
+// `fetchInstrumentInfo` and trading_schema_v7_etf_flag.sql. Two separate
+// mechanisms for two separate jobs: this list keeps watchlist slots focused
+// on tickers worth evaluating at all; the `is_etf` gate is the safety net
+// that holds regardless of which tickers make it onto that list.
 const BROAD_MARKET_ETFS = new Set([
   'SPY', 'QQQ', 'VOO', 'VTI', 'IVV', 'DIA', 'IWM', 'VEA', 'VUG', 'VTV',
   'ARKK', 'XLF', 'XLK', 'XLE', 'XLV', 'XLY', 'XLI', 'XLP', 'XLU', 'SPX',
@@ -241,6 +252,9 @@ interface WatchlistRow {
   ticker: string;
   name: string | null;
   active: boolean;
+  /** See `fetchInstrumentInfo`/`trading_schema_v7_etf_flag.sql` — `null` until
+   *  this ticker has been (re-)evaluated since that migration landed. */
+  is_etf: boolean | null;
 }
 
 interface SignalRow {
@@ -500,7 +514,34 @@ async function fetchStockTwitsSentiment(ticker: string): Promise<SentimentSummar
 // from residential IPs, so it's not a cloud-blocking issue, just a dead
 // source. Yahoo's public `/v8/finance/chart` JSON endpoint is free, keyless,
 // and gives us the same daily-close history we need.
+//
+// `meta.instrumentType` ("EQUITY" vs "ETF" vs ...) and `meta.longName` ride
+// along in the SAME response — see `fetchInstrumentInfo` below, which is the
+// real entry point now; this is kept as a thin wrapper purely so the
+// SPY-benchmark call site (which only ever wants the closes) doesn't have to
+// unwrap an object it has no use for.
 async function fetchPriceHistory(ticker: string): Promise<number[]> {
+  return (await fetchInstrumentInfo(ticker)).closes;
+}
+
+/** Daily closes plus the bits of Yahoo's `meta` block the watchlist needs to
+ *  tell stocks and ETFs apart (see `is_etf` in trading_schema_v7_etf_flag.sql)
+ *  and to fill in a human-readable name for tickers the seed list didn't cover
+ *  — all from data already being fetched, no extra request. */
+interface InstrumentInfo {
+  closes: number[];
+  /** `true`/`false` when Yahoo states `instrumentType` outright (authoritative
+   *  — "EQUITY" → false, "ETF" → true); `null` when that field is missing, so
+   *  callers can tell "confirmed not an ETF" from "Yahoo didn't say" and avoid
+   *  e.g. blocking a legitimate buy on momentarily-incomplete metadata. */
+  isEtf: boolean | null;
+  /** `longName` (falls back to `shortName`) — e.g. "Invesco QQQ Trust" — used
+   *  to opportunistically backfill `watchlist.name` for tickers that were
+   *  auto-discovered (and so only ever got a bare ticker symbol). */
+  name: string | null;
+}
+
+async function fetchInstrumentInfo(ticker: string): Promise<InstrumentInfo> {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
     ticker,
   )}?range=1mo&interval=1d`;
@@ -515,7 +556,19 @@ async function fetchPriceHistory(ticker: string): Promise<number[]> {
   }
   const closes: unknown[] = result?.indicators?.quote?.[0]?.close ?? [];
   const valid = closes.filter((n): n is number => typeof n === 'number' && Number.isFinite(n));
-  return valid.slice(-30); // last ~30 trading days, oldest first
+  const meta = result?.meta;
+  const instrumentType = typeof meta?.instrumentType === 'string' ? meta.instrumentType : null;
+  const name =
+    typeof meta?.longName === 'string'
+      ? meta.longName
+      : typeof meta?.shortName === 'string'
+        ? meta.shortName
+        : null;
+  return {
+    closes: valid.slice(-30), // last ~30 trading days, oldest first
+    isEtf: instrumentType === null ? null : instrumentType === 'ETF',
+    name,
+  };
 }
 
 // ── Intraday prices: finer-grained "recent high" for dip detection ───────
@@ -845,13 +898,18 @@ Deno.serve(async () => {
       .sort((a, b) => b[1] - a[1]);
 
     const hotPriceHistory = new Map<string, number[]>();
+    // Collected alongside the price history (same fetch, no extra request) so
+    // the watchlist sync below can write `is_etf`/`name` from real Yahoo data
+    // — see `InstrumentInfo` and trading_schema_v7_etf_flag.sql.
+    const instrumentInfoByTicker = new Map<string, InstrumentInfo>();
     for (const [symbol] of ranked.slice(0, CANDIDATE_POOL_SIZE)) {
       if (hotPriceHistory.size >= HOT_LIST_SIZE) break;
       if (hotPriceHistory.has(symbol)) continue;
       try {
-        const history = await fetchPriceHistory(symbol);
-        if (history.length > 0) {
-          hotPriceHistory.set(symbol, history);
+        const info = await fetchInstrumentInfo(symbol);
+        if (info.closes.length > 0) {
+          hotPriceHistory.set(symbol, info.closes);
+          instrumentInfoByTicker.set(symbol, info);
         }
       } catch {
         // Not a real/listed ticker (or Yahoo Finance has nothing for it) — skip.
@@ -865,7 +923,7 @@ Deno.serve(async () => {
     // hot list counts as "active" for new buys.
     const { data: existingWatchlist, error: watchlistError } = await supabase
       .from('watchlist')
-      .select('ticker, name, active');
+      .select('ticker, name, active, is_etf');
     if (watchlistError) throw watchlistError;
     const existingByTicker = new Map(
       ((existingWatchlist ?? []) as WatchlistRow[]).map((w) => [w.ticker, w]),
@@ -873,9 +931,12 @@ Deno.serve(async () => {
 
     for (const ticker of hotPriceHistory.keys()) {
       const existing = existingByTicker.get(ticker);
+      const info = instrumentInfoByTicker.get(ticker);
       if (!existing) {
-        await supabase.from('watchlist').insert({ ticker, active: true });
-        log.push(`${ticker}: neu entdeckt und zur Watchlist hinzugefügt.`);
+        await supabase
+          .from('watchlist')
+          .insert({ ticker, active: true, name: info?.name ?? null, is_etf: info?.isEtf ?? null });
+        log.push(`${ticker}: neu entdeckt und zur Watchlist hinzugefügt${info?.isEtf ? ' (ETF)' : ''}.`);
       } else if (!existing.active) {
         await supabase.from('watchlist').update({ active: true }).eq('ticker', ticker);
       }
@@ -927,10 +988,34 @@ Deno.serve(async () => {
     for (const ticker of positionTickers) {
       if (!evaluationSet.has(ticker)) {
         try {
-          evaluationSet.set(ticker, await fetchPriceHistory(ticker));
+          // Same combined fetch as discovery — keeps `instrumentInfoByTicker`
+          // complete for the buy-gate below AND lets a held position's row
+          // get its `is_etf`/`name` backfilled too (it can't be an ETF, the
+          // buy-gate would have refused it, but `name` is still worth having).
+          const info = await fetchInstrumentInfo(ticker);
+          evaluationSet.set(ticker, info.closes);
+          instrumentInfoByTicker.set(ticker, info);
         } catch {
           evaluationSet.set(ticker, []);
         }
+      }
+    }
+    // Opportunistic backfill for EVERY ticker we have a fresh read for —
+    // including held positions that aren't on the hot list. `is_etf`/`name`
+    // come straight from Yahoo's own classification (real data, not a guess),
+    // so unlike the v6 "missed opportunities" columns it's fine — and useful
+    // — to fill in whatever a row is still missing, rather than leaving every
+    // pre-v7 row stuck at "unknown" forever. Consolidated here (after BOTH
+    // the discovery and held-position fetches) so each ticker is patched once.
+    for (const [ticker, info] of instrumentInfoByTicker) {
+      const existing = existingByTicker.get(ticker);
+      if (!existing) continue;
+      const patch: Record<string, unknown> = {};
+      if (existing.is_etf === null && info.isEtf !== null) patch['is_etf'] = info.isEtf;
+      if (existing.name === null && info.name) patch['name'] = info.name;
+      if (Object.keys(patch).length > 0) {
+        await supabase.from('watchlist').update(patch).eq('ticker', ticker);
+        Object.assign(existing, patch); // keep in-memory copy consistent for the rest of this run
       }
     }
 
@@ -1001,7 +1086,12 @@ Deno.serve(async () => {
       // deliberately excluded from `wouldHaveBought` — those aren't "missed
       // opportunities" in the interesting sense, see
       // trading_schema_v6_missed_opportunities.sql for the full reasoning.)
-      const wouldHaveBought = marketOpen && !position && verdict === 'organic' && dropFromHigh <= DIP_THRESH;
+      const wouldHaveBought =
+        marketOpen &&
+        !position &&
+        verdict === 'organic' &&
+        instrumentInfoByTicker.get(ticker)?.isEtf !== true &&
+        dropFromHigh <= DIP_THRESH;
       const skippedForCapacity = wouldHaveBought && positions.length >= MAX_POSITIONS;
 
       const { error: signalError } = await supabase.from('signals').insert({
@@ -1118,10 +1208,25 @@ Deno.serve(async () => {
       // delay changes nothing material. The run-level "markets closed" log
       // line at the top already covers this; per-candidate noise here would
       // just clutter the log without adding information.
+      //
+      // `instrumentInfoByTicker.get(ticker)?.isEtf !== true`: a hard "never
+      // buy an ETF" gate, grounded in Yahoo's own `instrumentType` rather than
+      // the hand-curated `BROAD_MARKET_ETFS` list. That list only ever filters
+      // DISCOVERY (so well-known index ETFs don't waste a watchlist slot —
+      // see its comment for why their hype patterns are uninformative); it was
+      // never a buy-time safety net, and a leveraged/thematic ETF that isn't
+      // on it (TQQQ, SOXL, ARKQ, ...) could in principle clear the "organic"
+      // heuristic and get bought. This closes that gap with real classification
+      // data instead of an inevitably-incomplete list. `!== true` (rather than
+      // `=== false`) deliberately treats "Yahoo didn't say" (`null`) as "go
+      // ahead" — refusing a perfectly good stock buy over momentarily-missing
+      // metadata would be a worse failure mode than the near-impossible case
+      // of an actual ETF slipping through with no `instrumentType` at all.
       if (
         marketOpen &&
         !position &&
         verdict === 'organic' &&
+        instrumentInfoByTicker.get(ticker)?.isEtf !== true &&
         positions.length < MAX_POSITIONS
       ) {
         // For a SWING entry, "the recent high" should mean a meaningful

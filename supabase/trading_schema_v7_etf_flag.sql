@@ -1,0 +1,34 @@
+-- Migration v7 — run this in the Supabase SQL editor AFTER
+-- trading_schema_v6_missed_opportunities.sql has been applied. Purely
+-- additive (ALTER TABLE ... ADD COLUMN IF NOT EXISTS) and safe to re-run.
+--
+-- WHY: the dashboard's watchlist mixes individual stocks with ETFs (e.g.
+-- QQQ/SPY/VOO got discovered before `BROAD_MARKET_ETFS` existed to filter
+-- them out — see the comment on that constant in market-scan/index.ts). The
+-- user asked for stocks and ETFs to be displayed separately, which first
+-- requires actually KNOWING which watchlist entries are ETFs.
+--
+-- Rather than maintaining a second hand-curated list (which is exactly the
+-- kind of thing that silently goes stale — `BROAD_MARKET_ETFS` only covers
+-- ~20 well-known broad-market/sector ETFs; leveraged/thematic ETFs like
+-- TQQQ, SOXL, ARKQ etc. would sail right through it), `is_etf` is populated
+-- from Yahoo Finance's own `meta.instrumentType` field ("ETF" vs "EQUITY"),
+-- which the engine already fetches as part of `fetchInstrumentInfo()` (a
+-- thin extension of the existing price-history fetch — no new API calls).
+-- That's real, authoritative data, not a guess — so unlike the v6 columns,
+-- existing rows DO get backfilled, opportunistically, the next time each
+-- ticker is evaluated (see the watchlist-sync comment in market-scan/index.ts).
+--
+-- Until that backfill happens, `is_etf` is simply `null` — "we don't know
+-- yet", the honest state, not a fabricated `false`.
+--
+-- Bonus: this also closes a real gap. `BROAD_MARKET_ETFS` only filters
+-- DISCOVERY (so well-known index ETFs don't waste a watchlist slot) — it
+-- never stopped a different, non-listed ETF from being bought if it somehow
+-- cleared the "organic" heuristic. `is_etf` is now ALSO checked directly in
+-- the buy gate, so "the engine will not buy an ETF" becomes an actual
+-- guarantee grounded in Yahoo's own classification, not an incomplete
+-- hand-written list.
+
+alter table public.watchlist
+  add column if not exists is_etf boolean;
