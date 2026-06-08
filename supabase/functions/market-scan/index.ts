@@ -129,6 +129,36 @@ const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 // watchlist trades in USD. See swissquote.com fee schedule ("Fremdwährungen").
 const FX_FEE_RATE = 0.0095;
 
+// ── Real USD/CHF exchange-rate model ─────────────────────────────────────
+// Until now the simulation treated "1 USD ≈ 1 CHF" for every trade — only
+// Swissquote's conversion-margin SPREAD (FX_FEE_RATE above) was modelled,
+// not the underlying exchange rate itself. That was a meaningfully wrong
+// simplification: USD/CHF has moved by double-digit percentages over periods
+// as short as a year, and a CHF-based investor holding USD-denominated
+// stocks is exposed to BOTH the stock's price move AND the currency's move
+// between entry and exit — sometimes one cancels the other out, sometimes
+// they compound. Modelling only the fee while pretending the rate itself
+// never moves hides exactly the kind of risk (and occasional extra return)
+// real Swissquote customers experience.
+//
+// `fetchUsdChfRate()` below fetches the LIVE spot rate from the same Yahoo
+// Finance chart endpoint already used for stock/benchmark prices (symbol
+// `USDCHF=X`, Yahoo's standard FX-pair ticker — no new API/secret needed),
+// fetched once per run and applied consistently to every USD→CHF conversion
+// in that run (mirroring how `benchmarkHistory`/`spyPrice` are fetched once
+// and shared). `FALLBACK_USD_CHF_RATE` is ONLY a safety net for the rare
+// case that fetch fails — a rough round-number approximation (CHF has
+// structurally traded close to, or somewhat stronger than, USD in recent
+// years) so a single flaky request can't block the whole run.
+//
+// Every transaction now also stores the rate that applied AT THAT MOMENT
+// (`usd_chf_rate`) — both for transparency in the transaction log, and so
+// `realized_pnl` on a SELL can convert the matching BUY's cost basis at the
+// rate that applied when the position was OPENED rather than today's rate
+// (see the comment at that computation for why mixing the two would quietly
+// misattribute currency moves as "trading" P&L).
+const FALLBACK_USD_CHF_RATE = 0.80;
+
 // How many past `signals` rows feed the z-score baseline in `classify()`.
 // At the 6-hourly scan cadence, 8 rows ≈ 2 days — barely more than a single
 // weekend blip, and far too short to capture the weekday/weekend rhythm
@@ -313,15 +343,50 @@ async function fetchOpeningCosts(
   // deno-lint-ignore no-explicit-any
   supabase: any,
   openingTransactionId: number | null,
-): Promise<{ fee: number; fxFee: number }> {
-  if (openingTransactionId === null) return { fee: 0, fxFee: 0 };
+): Promise<{ fee: number; fxFee: number; usdChfRate: number | null }> {
+  if (openingTransactionId === null) return { fee: 0, fxFee: 0, usdChfRate: null };
   const { data, error } = await supabase
     .from('transactions')
-    .select('fee, fx_fee')
+    .select('fee, fx_fee, usd_chf_rate')
     .eq('id', openingTransactionId)
     .maybeSingle();
-  if (error || !data) return { fee: 0, fxFee: 0 };
-  return { fee: Number(data.fee) || 0, fxFee: Number(data.fx_fee) || 0 };
+  if (error || !data) return { fee: 0, fxFee: 0, usdChfRate: null };
+  return {
+    fee: Number(data.fee) || 0,
+    fxFee: Number(data.fx_fee) || 0,
+    // `null` for legacy positions opened before this column existed — the
+    // caller falls back to today's rate for those (see realized_pnl comment).
+    usdChfRate: data.usd_chf_rate === null || data.usd_chf_rate === undefined ? null : Number(data.usd_chf_rate),
+  };
+}
+
+/**
+ * Live USD/CHF spot rate — "how many CHF does 1 USD buy right now". Fetched
+ * from the very same Yahoo Finance chart endpoint already used for stock and
+ * benchmark prices, just with the `USDCHF=X` symbol (Yahoo's standard ticker
+ * for that currency pair) — so no new API, key, or secret is needed. Falls
+ * back to `FALLBACK_USD_CHF_RATE` if the fetch fails for any reason: an FX
+ * quote is important enough to model, but not important enough to abort an
+ * entire scan run over a single flaky request.
+ */
+async function fetchUsdChfRate(): Promise<number> {
+  const url = 'https://query1.finance.yahoo.com/v8/finance/chart/USDCHF=X?range=5d&interval=1d';
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
+    if (!res.ok) return FALLBACK_USD_CHF_RATE;
+    const data = await res.json();
+    const result = data?.chart?.result?.[0];
+    if (data?.chart?.error || !result) return FALLBACK_USD_CHF_RATE;
+    const closes: unknown[] = result?.indicators?.quote?.[0]?.close ?? [];
+    for (let i = closes.length - 1; i >= 0; i -= 1) {
+      const value = closes[i];
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+    }
+    return FALLBACK_USD_CHF_RATE;
+  } catch (err) {
+    console.warn(`USD/CHF-Kurs konnte nicht geladen werden, nutze Näherungswert: ${err}`);
+    return FALLBACK_USD_CHF_RATE;
+  }
 }
 
 // ── Source 1 (primary): ApeWisdom — pre-aggregated Reddit mention ranking ─
@@ -848,6 +913,15 @@ Deno.serve(async () => {
       );
     }
 
+    // ── USD/CHF spot rate, fetched ONCE per run ─────────────────────────
+    // Shared across every conversion below (budget sizing, gross amounts,
+    // realized PnL, the positions snapshot, ...) so a single run is
+    // internally consistent — exactly like `benchmarkHistory`/`spyPrice`
+    // above. See the constant's comment near FALLBACK_USD_CHF_RATE for the
+    // full reasoning behind introducing this model at all.
+    const usdChfRate = await fetchUsdChfRate();
+    log.push(`Wechselkurs USD→CHF: ${usdChfRate.toFixed(4)} (live, Yahoo Finance USDCHF=X).`);
+
     // ── Phase 3: evaluate every hot ticker plus anything we still hold ──
     const evaluationSet = new Map<string, number[]>(hotPriceHistory);
     for (const ticker of positionTickers) {
@@ -941,11 +1015,16 @@ Deno.serve(async () => {
           );
         }
         if (exitTriggered && marketOpen) {
-          const grossAmount = position.shares * price;
+          // Real money: the sale produces USD, which Swissquote then converts
+          // to CHF at today's spot rate (modulo its margin, modelled by `fx`
+          // below) before crediting the account — so `grossAmount` (what
+          // actually lands in `cash`) must be the CHF-converted figure, not
+          // the raw USD trade value.
+          const grossAmountUsd = position.shares * price;
+          const grossAmount = grossAmountUsd * usdChfRate;
           const fee = swissquoteFee(grossAmount);
           const fx = fxFee(grossAmount);
           const proceeds = grossAmount - fee - fx;
-          const costBasis = position.shares * position.entry_price;
           // `costBasis` only covers what was actually invested (shares ×
           // entry price) — the BUY's brokerage fee + FX margin were paid out
           // of `cash` separately and never show up here. Without subtracting
@@ -956,6 +1035,17 @@ Deno.serve(async () => {
           // the linked opening transaction (cheap: sells are infrequent)
           // makes this number mean what it says.
           const openingCosts = await fetchOpeningCosts(supabase, position.opening_transaction_id);
+          // Convert the cost basis at the rate that applied when the position
+          // was OPENED, not today's — otherwise a currency move between entry
+          // and exit would silently get counted as "trading" P&L instead of
+          // FX P&L (both are real money either way, but conflating them would
+          // make the "Lern-Insights" verdict/z-score performance views draw
+          // the wrong lesson from what actually moved the outcome). Falls
+          // back to today's rate only for legacy positions opened before this
+          // column existed (no historical rate on file to use instead).
+          const entryFxRate = openingCosts.usdChfRate ?? usdChfRate;
+          const costBasisUsd = position.shares * position.entry_price;
+          const costBasis = costBasisUsd * entryFxRate;
           const realizedPnl = proceeds - costBasis - openingCosts.fee - openingCosts.fxFee;
           const exitReason: 'take-profit' | 'stop-loss' = change >= TAKE_PROFIT ? 'take-profit' : 'stop-loss';
 
@@ -968,6 +1058,7 @@ Deno.serve(async () => {
             fx_fee: fx,
             currency: 'USD',
             gross_amount: grossAmount,
+            usd_chf_rate: usdChfRate,
             realized_pnl: realizedPnl,
             opening_transaction_id: position.opening_transaction_id,
             exit_reason: exitReason,
@@ -1015,17 +1106,29 @@ Deno.serve(async () => {
         const recentHigh = Math.max(...dailyHistory);
         const dropFromHigh = (price - recentHigh) / recentHigh;
         if (dropFromHigh <= DIP_THRESH) {
-          const totalValue =
-            portfolio.cash +
-            positions.reduce((sum, p) => sum + p.shares * (latestPrices.get(p.ticker) ?? p.entry_price), 0);
-          const budget = totalValue * POSITION_SIZE;
+          // `cash` is CHF; open positions' mark-to-market value is computed
+          // from USD prices — convert it to CHF before summing, otherwise
+          // `totalValue` (and therefore the CHF `budget` derived from it)
+          // would silently understate/overstate the portfolio depending on
+          // which way USD/CHF happens to be leaning that day.
+          const positionsValueUsd = positions.reduce(
+            (sum, p) => sum + p.shares * (latestPrices.get(p.ticker) ?? p.entry_price),
+            0,
+          );
+          const totalValue = portfolio.cash + positionsValueUsd * usdChfRate;
+          const budget = totalValue * POSITION_SIZE; // CHF — this is what we're willing to spend
           const fee = swissquoteFee(budget);
           const fx = fxFee(budget);
-          const investable = budget - fee - fx;
-          const shares = investable > 0 ? investable / price : 0;
+          const investable = budget - fee - fx; // CHF actually available to convert & invest
+          // `price` is in USD; `price * usdChfRate` is "CHF cost per share" —
+          // dividing the CHF budget by that yields the right USD-denominated
+          // share count for a CHF-sized position (so `shares * price *
+          // usdChfRate ≈ investable`, see `grossAmount` just below).
+          const shares = investable > 0 ? investable / (price * usdChfRate) : 0;
 
           if (shares > 0 && portfolio.cash >= budget) {
-            const grossAmount = shares * price;
+            const grossAmountUsd = shares * price;
+            const grossAmount = grossAmountUsd * usdChfRate; // CHF — what actually leaves `cash`
             // Structured snapshot of every feature the engine considered —
             // so a future review can run e.g. "of all organic-verdict buys,
             // what fraction closed at take-profit vs. stop-loss, bucketed by
@@ -1056,6 +1159,7 @@ Deno.serve(async () => {
                 fx_fee: fx,
                 currency: 'USD',
                 gross_amount: grossAmount,
+                usd_chf_rate: usdChfRate,
                 signal_snapshot: signalSnapshot,
                 reason: `Swing-Einstieg: ${(dropFromHigh * 100).toFixed(1)}% unter dem Mehrwochenhoch (${dailyHistory.length} Handelstage Historie), Hype organisch (Score ${hypeScore.toFixed(0)}, z=${zScore.toFixed(1)}) & von Stimmung/Kurs bestätigt.`,
               })
@@ -1084,10 +1188,14 @@ Deno.serve(async () => {
       .update({ ...portfolio, updated_at: new Date().toISOString() })
       .eq('id', true);
 
-    const positionsValue = positions.reduce(
+    // Mark-to-market value of open positions, in CHF — `shares`/`price` are
+    // USD-denominated, so the live `usdChfRate` (fetched once, up top)
+    // converts the snapshot to the same currency as `cash`/`total_value`.
+    const positionsValueUsd = positions.reduce(
       (sum, p) => sum + p.shares * (latestPrices.get(p.ticker) ?? p.entry_price),
       0,
     );
+    const positionsValue = positionsValueUsd * usdChfRate;
     // Reuses `benchmarkHistory` (fetched once, up top, for `relativeStrengthPct`)
     // rather than a second round-trip to Yahoo Finance for the same symbol.
     const spyPrice = benchmarkHistory.length ? benchmarkHistory[benchmarkHistory.length - 1] : null;
@@ -1099,6 +1207,7 @@ Deno.serve(async () => {
       positions_value: positionsValue,
       total_value: portfolio.cash + positionsValue,
       spy_price: spyPrice,
+      usd_chf_rate: usdChfRate,
     });
 
     return new Response(JSON.stringify({ ok: true, log }, null, 2), {

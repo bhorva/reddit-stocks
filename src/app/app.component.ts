@@ -28,9 +28,9 @@ import { TradingDashboardComponent } from './trading-dashboard.component';
   styles: [
     `
       .container {
-        max-width: 720px;
+        max-width: 1440px;
         margin: 0 auto;
-        padding: 2rem 1rem;
+        padding: 2rem 1.5rem;
         font-family: system-ui, -apple-system, sans-serif;
       }
       h1 {

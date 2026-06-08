@@ -73,10 +73,22 @@ interface TradeMarkerMeta {
       </div>
 
       <p class="muted fx-note">
-        Hinweis: Aktienkurse stammen von US-Börsen (USD). Die Simulation rechnet
-        1 USD ≈ 1 CHF (kein Wechselkursmodell), bildet aber die reale
-        Devisen-Umtauschmarge von Swissquote (≈0,95&nbsp;% pro Transaktion) als
-        zusätzliche Gebühr ab — Portfoliowert &amp; Gebühren sind in CHF, Aktienpreise in USD.
+        Hinweis: Aktienkurse stammen von US-Börsen und sind in USD notiert.
+        Die Simulation rechnet sie mit einem echten Wechselkursmodell in CHF
+        um — pro Lauf wird der aktuelle USD/CHF-Kassakurs live abgerufen
+        @if (latestUsdChfRate(); as rate) {
+          (zuletzt <strong>1 USD ≈ {{ rate | number: '1.4-4' }} CHF</strong>)
+        }
+        und auf jede Transaktion sowie jeden Portfolio-Snapshot angewendet —
+        zusätzlich zur realen Devisen-Umtauschmarge von Swissquote (≈0,95&nbsp;%
+        pro Transaktion, separat als Gebühr ausgewiesen). Das bildet nicht nur
+        die Kosten, sondern auch das echte Währungsrisiko ab: Verschiebt sich
+        der Kurs zwischen Kauf und Verkauf einer Position, wirkt sich das
+        zusätzlich zur reinen Kursbewegung der Aktie auf den realisierten
+        Gewinn/Verlust aus — genau wie bei einem echten Swissquote-Konto in CHF.
+        Portfoliowert, Gebühren &amp; realisierte Gewinne werden in CHF
+        ausgewiesen, Aktienpreise bleiben in USD (so wie sie tatsächlich
+        gehandelt werden).
       </p>
 
       @if (error()) {
@@ -106,7 +118,17 @@ interface TradeMarkerMeta {
         re-creating it on every switch back.
       -->
       <div [hidden]="activeTab() !== 'overview'">
-      <div class="grid-top">
+      <!--
+        All "info box" stat cards — headline portfolio numbers AND the
+        closed-trade performance metrics — live in ONE shared grid now
+        (the .grid-stats CSS class) so they read as a single cohesive stats wall instead
+        of two visually-disconnected rows that wrapped awkwardly at medium
+        widths. The HTML comment further down still documents WHY the
+        performance-metric cards are conceptually distinct (derived from
+        closed trades, not just current portfolio state) — that grouping is
+        now communicated through ordering/spacing rather than a separate grid.
+      -->
+      <div class="grid-stats">
           <div class="card">
             <h3>Portfoliowert</h3>
             <div class="stat-value">{{ totalValue() | number: '1.2-2' }} CHF</div>
@@ -126,15 +148,15 @@ interface TradeMarkerMeta {
             <div class="stat-value neu">{{ portfolio()?.blocked_count ?? 0 }}</div>
             <div class="stat-sub">{{ portfolio()?.blocked_capital | number: '1.2-2' }} CHF nicht riskiert</div>
           </div>
-        </div>
-
         <!--
           Performance metrics derived from closed trades — these are what
           actually answer "is the strategy any good", which raw P&L alone
           doesn't: a high win rate with tiny wins and rare huge losses (or
-          vice versa) looks identical in the headline number above.
+          vice versa) looks identical in the headline number above. Kept in
+          the SAME .grid-stats grid as the headline cards above (just later
+          in reading order) so the whole "info box" section groups together
+          as one wall of stats rather than fragmenting into separate grids.
         -->
-        <div class="grid-top grid-top-metrics">
           <div class="card">
             <h3>Trefferquote <span class="info-icon" tabindex="0" title="Anteil der bereits abgeschlossenen (verkauften) Trades, die mit Gewinn endeten. Sagt für sich allein noch nichts über die Höhe von Gewinnen/Verlusten aus — siehe daneben.">ⓘ</span></h3>
             @if (winRate(); as wr) {
@@ -617,7 +639,7 @@ interface TradeMarkerMeta {
                     <th>Menge</th>
                     <th>Kurs (USD)</th>
                     <th>Gebühr (CHF)</th>
-                    <th>Brutto</th>
+                    <th>Brutto (CHF)</th>
                     <th>PnL (CHF)</th>
                     <th>Begründung</th>
                   </tr>
@@ -638,7 +660,17 @@ interface TradeMarkerMeta {
                         {{ (t.fee + t.fx_fee) | number: '1.2-2' }}
                         @if (t.fx_fee > 0) { <span class="muted fee-fx-hint">(inkl. FX)</span> }
                       </td>
-                      <td class="nowrap">{{ t.gross_amount | number: '1.2-2' }}</td>
+                      <td
+                        class="nowrap"
+                        [title]="
+                          t.usd_chf_rate !== null
+                            ? ((t.shares * t.price | number: '1.2-2') + ' USD, umgerechnet zu Kurs 1 USD ≈ ' + (t.usd_chf_rate | number: '1.4-4') + ' CHF')
+                            : 'Wechselkurs für diese (ältere) Transaktion nicht erfasst (vor Einführung des FX-Modells, 1 USD ≈ 1 CHF angenommen).'
+                        "
+                      >
+                        {{ t.gross_amount | number: '1.2-2' }}
+                        @if (t.usd_chf_rate !== null) { <span class="muted fee-fx-hint">CHF</span> }
+                      </td>
                       <td class="nowrap">
                         @if (t.realized_pnl !== null) {
                           <span [class.pos]="t.realized_pnl >= 0" [class.neg]="t.realized_pnl < 0">{{ t.realized_pnl | number: '1.2-2' }} CHF</span>
@@ -660,23 +692,51 @@ interface TradeMarkerMeta {
   styles: [
     `
       .section-title { margin-top: 2rem; margin-bottom: 0.25rem; }
-      .grid-top { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+      /*
+        One unified grid for ALL 8 "info box" stat cards (headline portfolio
+        numbers + closed-trade performance metrics) — they group into a
+        single, cohesive wall of stats: a clean 4-column x 2-row block on
+        wide screens (was previously two visually-disconnected grids, one
+        3-wide and one 4-wide-with-an-orphan-5th-card that wrapped
+        awkwardly). Fixed 4 columns rather than auto-fit/minmax on purpose —
+        with exactly 8 cards, 4 columns divides evenly into two tidy rows;
+        auto-fit would instead produce an irregular last row (e.g. 7 + 1) on
+        the now much wider dashboard. Falls back to 2, then 1 column at
+        narrower widths (see the @media rules below).
+      */
+      .grid-stats {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 1rem;
+        margin-bottom: 1rem;
+      }
+      @media (max-width: 1100px) {
+        .grid-stats { grid-template-columns: repeat(2, 1fr); }
+      }
       .grid-mid { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; margin-bottom: 1rem; }
       .grid-bot { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
       .grid-bot-single { grid-template-columns: 1fr; }
+      /*
+        Transactions tab: lets the (often very wide) table breathe beyond the
+        dashboard's normal column width by breaking out of app.component's
+        .container. Its own max-width is intentionally larger than the
+        container's (1440px) so it still gains real extra room on wide
+        viewports rather than just matching — but caps out before becoming
+        uncomfortably wide on ultra-wide monitors.
+      */
       .tx-wide {
         position: relative;
         left: 50%;
         transform: translateX(-50%);
         width: calc(100vw - 2rem);
-        max-width: 1180px;
+        max-width: 1640px;
         box-sizing: border-box;
       }
-      @media (max-width: 1180px) {
+      @media (max-width: 1640px) {
         .tx-wide { position: static; left: auto; transform: none; width: auto; max-width: none; }
       }
       @media (max-width: 900px) {
-        .grid-top, .grid-mid, .grid-bot { grid-template-columns: 1fr; }
+        .grid-stats, .grid-mid, .grid-bot { grid-template-columns: 1fr; }
       }
       .card {
         background: #fafafa; border: 1px solid #e2e2e2;
@@ -693,7 +753,12 @@ interface TradeMarkerMeta {
       .neu { color: #c98a00; }
       .muted { color: #888; font-size: 0.85rem; }
       .loading-note { margin: 0 0 0.75rem; }
-      .chart-wrap { position: relative; height: 220px; }
+      /*
+        Taller than before (220px → 280px): the dashboard now spans a much
+        wider container, so the chart card itself is noticeably wider — a
+        flat 220px height started looking stretched/thin at that width.
+      */
+      .chart-wrap { position: relative; height: 280px; }
       .chart-empty {
         position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
         margin: 0; pointer-events: none;
@@ -744,7 +809,6 @@ interface TradeMarkerMeta {
       .scan-stale { color: #d9534f; font-weight: 600; }
       .fx-note { margin: -0.5rem 0 1rem; line-height: 1.4; }
       .chart-note { margin: 0.5rem 0 0; line-height: 1.4; font-size: 0.72rem; }
-      .grid-top-metrics { grid-template-columns: repeat(4, 1fr); }
       .stat-sub-inline { font-size: 0.78rem; color: #888; }
       .fee-fx-hint { font-size: 0.65rem; color: #aaa; }
       /*
@@ -769,9 +833,6 @@ interface TradeMarkerMeta {
       .insights-table th, .insights-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #eee; }
       .insights-table th { color: #888; font-weight: 600; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.02em; }
       .insights-hint { margin: 0.5rem 0 0; }
-      @media (max-width: 900px) {
-        .grid-top-metrics { grid-template-columns: 1fr 1fr; }
-      }
       .tx-summary { margin-bottom: 0.75rem; }
       .tx-table-wrap { max-height: 560px; overflow-y: auto; overflow-x: hidden; }
       .tx-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 0.78rem; }
@@ -824,7 +885,7 @@ interface TradeMarkerMeta {
 
       /* ── Second grid-mid row: allocation bars + cash-vs-invested chart ───── */
       .grid-mid-reverse { grid-template-columns: 1fr 1fr; }
-      .chart-wrap-small { height: 180px; }
+      .chart-wrap-small { height: 220px; }
       .alloc-row { margin-bottom: 0.65rem; }
       .alloc-row:last-child { margin-bottom: 0; }
       .alloc-row-head {
@@ -894,6 +955,32 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   protected readonly zScorePerformance = signal<ZScoreBucketPerformanceRow[]>([]);
 
   protected readonly totalValue = signal(0);
+
+  // ── USD/CHF exchange-rate model ──────────────────────────────────────────
+  // Surfaces the live rate the Edge Functions most recently fetched & applied
+  // (Yahoo Finance `USDCHF=X`, recorded once per run on every transaction AND
+  // balance snapshot — see `.fx-note` below for the user-facing explanation
+  // and `usd_chf_rate` migration v4 for the schema change). Prefers the
+  // freshest TRANSACTION over the freshest snapshot when both exist for the
+  // same moment, since a trade is the more concrete "this rate was actually
+  // used to move real CHF" anchor; falls through to balance_history (written
+  // every run, trades or not) so the note still shows a rate between trades.
+  // `null` only when NEITHER source has a recorded rate yet (i.e. every run
+  // since the v4 migration predates this dashboard load — effectively never
+  // once the next scan completes).
+  protected readonly latestUsdChfRate = computed(() => {
+    // `transactions` arrives newest-first (see TradingService.getTransactionLog),
+    // `balanceHistory` arrives oldest-first/newest-LAST (it's reversed for the
+    // chart, see TradingService.getBalanceHistory) — `.find`/`.at(-1)` pick
+    // the newest from each accordingly.
+    const fromTx = this.transactions().find((t) => t.usd_chf_rate !== null)?.usd_chf_rate;
+    if (fromTx != null) return fromTx;
+    const history = this.balanceHistory();
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (history[i].usd_chf_rate !== null) return history[i].usd_chf_rate;
+    }
+    return null;
+  });
 
   // ── Watchlist & Signale: sortable + filterable ──────────────────────────
   // Default sort = Hype-Score absteigend: die Tabelle visualisiert "Hype"
@@ -1324,7 +1411,10 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   protected exportTransactionsCsv(): void {
     const rows = this.filteredTransactions();
     if (rows.length === 0) return;
-    const header = ['Datum', 'Aktion', 'Ticker', 'Menge', 'Kurs (USD)', 'Gebühr (CHF)', 'FX-Marge (CHF)', 'Brutto', 'PnL (CHF)', 'Begründung'];
+    const header = [
+      'Datum', 'Aktion', 'Ticker', 'Menge', 'Kurs (USD)', 'Gebühr (CHF)', 'FX-Marge (CHF)',
+      'Wechselkurs (USD→CHF)', 'Brutto (CHF)', 'PnL (CHF)', 'Begründung',
+    ];
     const escapeCsv = (value: string): string => `"${value.replace(/"/g, '""')}"`;
     const lines = [
       header.join(','),
@@ -1337,6 +1427,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
           t.price,
           t.fee,
           t.fx_fee,
+          t.usd_chf_rate ?? '',
           t.gross_amount,
           t.realized_pnl ?? '',
           escapeCsv(t.reason),

@@ -196,6 +196,16 @@ export interface TransactionRow {
   fx_fee: number;
   currency: string;
   gross_amount: number;
+  /**
+   * USD→CHF spot rate ("how many CHF does 1 USD buy") that applied when this
+   * transaction was recorded — fetched live (Yahoo Finance `USDCHF=X`) by the
+   * Edge Function and used to convert the USD-denominated trade value into
+   * the CHF `gross_amount` that actually moved `cash`. `null` for legacy rows
+   * that predate the v4 FX-rate migration (the simulation used to assume
+   * 1 USD ≈ 1 CHF outright). Divide `gross_amount` by this to recover the
+   * USD trade value (`shares * price`).
+   */
+  usd_chf_rate: number | null;
   realized_pnl: number | null;
   reason: string;
   created_at: string;
@@ -211,6 +221,13 @@ export interface BalanceHistoryRow {
   positions_value: number;
   total_value: number;
   spy_price: number | null;
+  /**
+   * USD→CHF spot rate used to convert this snapshot's USD-denominated
+   * `positions_value` mark-to-market into CHF (see `TransactionRow.usd_chf_rate`
+   * for the full reasoning). `null` for legacy rows that predate the v4
+   * FX-rate migration.
+   */
+  usd_chf_rate: number | null;
 }
 
 /** Row of `trade_outcomes_by_verdict` — see trading_schema_v3_signal_performance_views.sql */

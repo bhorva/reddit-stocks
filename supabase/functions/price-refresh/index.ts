@@ -44,6 +44,16 @@ const STOP_LOSS = -0.06;
 // a CHF account — kept in sync with the same constant in `market-scan`.
 const FX_FEE_RATE = 0.0095;
 
+// Real USD/CHF exchange-rate model — kept in sync with `market-scan` (see the
+// detailed comment there for the full reasoning). Short version: "1 USD ≈
+// 1 CHF" was a meaningfully wrong simplification once you actually hold
+// USD-denominated stocks from a CHF account; only the conversion-margin
+// SPREAD (FX_FEE_RATE) was modelled before, not the underlying rate's own
+// movement. `fetchUsdChfRate()` fetches the live spot rate from the same
+// Yahoo Finance endpoint already used for stock prices (`USDCHF=X`); this
+// fallback is purely a safety net for when that fetch fails.
+const FALLBACK_USD_CHF_RATE = 0.80;
+
 interface PositionRow {
   id: number;
   ticker: string;
@@ -120,15 +130,46 @@ async function fetchOpeningCosts(
   // deno-lint-ignore no-explicit-any
   supabase: any,
   openingTransactionId: number | null,
-): Promise<{ fee: number; fxFee: number }> {
-  if (openingTransactionId === null) return { fee: 0, fxFee: 0 };
+): Promise<{ fee: number; fxFee: number; usdChfRate: number | null }> {
+  if (openingTransactionId === null) return { fee: 0, fxFee: 0, usdChfRate: null };
   const { data, error } = await supabase
     .from('transactions')
-    .select('fee, fx_fee')
+    .select('fee, fx_fee, usd_chf_rate')
     .eq('id', openingTransactionId)
     .maybeSingle();
-  if (error || !data) return { fee: 0, fxFee: 0 };
-  return { fee: Number(data.fee) || 0, fxFee: Number(data.fx_fee) || 0 };
+  if (error || !data) return { fee: 0, fxFee: 0, usdChfRate: null };
+  return {
+    fee: Number(data.fee) || 0,
+    fxFee: Number(data.fx_fee) || 0,
+    usdChfRate: data.usd_chf_rate === null || data.usd_chf_rate === undefined ? null : Number(data.usd_chf_rate),
+  };
+}
+
+/**
+ * Live USD/CHF spot rate — mirrors the identically-named/-implemented helper
+ * in `market-scan` (see there for the full reasoning); kept duplicated per
+ * this project's "no shared module between the two tiny Edge Functions"
+ * convention. Reuses the same Yahoo Finance chart endpoint as
+ * `fetchLatestPrice` below, just with the `USDCHF=X` FX-pair symbol.
+ */
+async function fetchUsdChfRate(): Promise<number> {
+  const url = 'https://query1.finance.yahoo.com/v8/finance/chart/USDCHF=X?range=5d&interval=1d';
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
+    if (!res.ok) return FALLBACK_USD_CHF_RATE;
+    const data = await res.json();
+    const result = data?.chart?.result?.[0];
+    if (data?.chart?.error || !result) return FALLBACK_USD_CHF_RATE;
+    const closes: unknown[] = result?.indicators?.quote?.[0]?.close ?? [];
+    for (let i = closes.length - 1; i >= 0; i -= 1) {
+      const value = closes[i];
+      if (typeof value === 'number' && Number.isFinite(value)) return value;
+    }
+    return FALLBACK_USD_CHF_RATE;
+  } catch (err) {
+    console.warn(`USD/CHF-Kurs konnte nicht geladen werden, nutze Näherungswert: ${err}`);
+    return FALLBACK_USD_CHF_RATE;
+  }
 }
 
 // Same Yahoo Finance chart endpoint `market-scan` uses for daily history — but
@@ -206,6 +247,11 @@ Deno.serve(async () => {
     if (positionsError) throw positionsError;
     const positions = (openPositions ?? []) as PositionRow[];
 
+    // Fetched ONCE per run and shared across every conversion below — mirrors
+    // `market-scan`'s approach (see the constant comment there for the full
+    // reasoning behind modelling a real exchange rate at all).
+    const usdChfRate = await fetchUsdChfRate();
+
     const latestPrices = new Map<string, number>();
 
     for (const position of [...positions]) {
@@ -218,17 +264,29 @@ Deno.serve(async () => {
 
       const change = (price - position.entry_price) / position.entry_price;
       if (change >= TAKE_PROFIT || change <= STOP_LOSS) {
-        const grossAmount = position.shares * price;
+        // `grossAmount` must be the CHF-converted figure (what actually lands
+        // in `cash` once Swissquote converts the USD sale proceeds) — see
+        // `market-scan`'s sell branch for the full reasoning behind the FX
+        // model.
+        const grossAmountUsd = position.shares * price;
+        const grossAmount = grossAmountUsd * usdChfRate;
         const fee = swissquoteFee(grossAmount);
         const fx = fxFee(grossAmount);
         const proceeds = grossAmount - fee - fx;
-        const costBasis = position.shares * position.entry_price;
         // See `market-scan`'s sell branch for the full explanation: costBasis
         // alone omits the BUY's brokerage fee + FX margin (paid out of cash
         // separately), which made `realized_pnl` look more profitable than
         // the trade truly was. Subtracting the linked opening transaction's
         // costs makes the number honest.
         const openingCosts = await fetchOpeningCosts(supabase, position.opening_transaction_id);
+        // Convert the cost basis at the rate that applied when the position
+        // was OPENED (not today's) — see `market-scan`'s sell branch for why
+        // mixing the two would misattribute currency moves as trading P&L.
+        // Falls back to today's rate only for legacy positions with no
+        // recorded opening rate.
+        const entryFxRate = openingCosts.usdChfRate ?? usdChfRate;
+        const costBasisUsd = position.shares * position.entry_price;
+        const costBasis = costBasisUsd * entryFxRate;
         const realizedPnl = proceeds - costBasis - openingCosts.fee - openingCosts.fxFee;
         const interim = change >= TAKE_PROFIT ? 'interim-take-profit' : 'interim-stop-loss';
 
@@ -241,6 +299,7 @@ Deno.serve(async () => {
           fx_fee: fx,
           currency: 'USD',
           gross_amount: grossAmount,
+          usd_chf_rate: usdChfRate,
           realized_pnl: realizedPnl,
           opening_transaction_id: position.opening_transaction_id,
           exit_reason: interim,
@@ -271,16 +330,21 @@ Deno.serve(async () => {
       .update({ ...portfolio, updated_at: new Date().toISOString() })
       .eq('id', true);
 
-    const positionsValue = positions.reduce(
+    // USD-denominated mark-to-market value, converted to CHF via the same
+    // live rate used for every other conversion this run (see `market-scan`'s
+    // snapshot for the identical reasoning).
+    const positionsValueUsd = positions.reduce(
       (sum, p) => sum + p.shares * (latestPrices.get(p.ticker) ?? p.entry_price),
       0,
     );
+    const positionsValue = positionsValueUsd * usdChfRate;
     const spyPrice = await fetchBenchmarkPrice();
     await supabase.from('balance_history').insert({
       cash: portfolio.cash,
       positions_value: positionsValue,
       total_value: portfolio.cash + positionsValue,
       spy_price: spyPrice,
+      usd_chf_rate: usdChfRate,
     });
     log.push(
       `Portfolio aktualisiert: Cash ${portfolio.cash.toFixed(2)} CHF, ` +
