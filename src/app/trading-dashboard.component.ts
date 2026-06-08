@@ -33,19 +33,47 @@ Chart.register(...registerables);
       </div>
     } @else {
       <h2 class="section-title">📈 Pump-&amp;-Dip-Simulation</h2>
-      <p class="section-subtitle">
-        Server-seitige Auswertung alle 6 Stunden · echte Reddit-Signale + Kursdaten ·
-        Swissquote-Gebühren · Startkapital 10 000 CHF
-      </p>
+
+      <div class="tabs">
+        <button type="button" class="tab" [class.active]="activeTab() === 'overview'" (click)="activeTab.set('overview')">
+          Übersicht
+        </button>
+        <button type="button" class="tab" [class.active]="activeTab() === 'transactions'" (click)="activeTab.set('transactions')">
+          Transaktionen
+          @if (transactions().length > 0) {
+            <span class="tab-count">{{ transactions().length }}</span>
+          }
+        </button>
+      </div>
 
       @if (error()) {
         <div class="error">{{ error() }}</div>
       }
 
+      <!--
+        IMPORTANT: the grid (and therefore the chart canvas) must always be
+        rendered, never gated behind loading(). ngOnInit sets loading to true
+        synchronously, BEFORE ngAfterViewInit runs — so an
+        '@if (loading()) {...} @else { canvas }' structure means the canvas
+        doesn't exist in the DOM on first render, the ViewChild stays
+        undefined, and renderChart() (called once data arrives, before
+        loading flips back to false in the finally block) silently no-ops.
+        The result: a permanently empty chart. Showing "Lade ..." as a small
+        inline note alongside the (initially empty-state) grid avoids the
+        remount entirely.
+      -->
       @if (loading()) {
-        <p>Lade …</p>
-      } @else {
-        <div class="grid-top">
+        <p class="muted loading-note">Lade …</p>
+      }
+
+      <!--
+        Both tab panels stay mounted (toggled with [hidden], not @if) so the
+        chart canvas is never removed/recreated when switching tabs — that
+        would detach the existing Chart.js instance from the DOM and require
+        re-creating it on every switch back.
+      -->
+      <div [hidden]="activeTab() !== 'overview'">
+      <div class="grid-top">
           <div class="card">
             <h3>Portfoliowert</h3>
             <div class="stat-value">{{ totalValue() | number: '1.2-2' }} CHF</div>
@@ -115,7 +143,7 @@ Chart.register(...registerables);
           </div>
         </div>
 
-        <div class="grid-bot">
+        <div class="grid-bot grid-bot-single">
           <div class="card">
             <h3>Offene Positionen</h3>
             @if (positions().length === 0) {
@@ -171,40 +199,96 @@ Chart.register(...registerables);
               </div>
             }
           </div>
-          <div class="card">
-            <h3>Transaktionslog</h3>
-            @if (transactions().length === 0) {
-              <p class="muted">Noch keine Transaktionen.</p>
-            } @else {
-              <div class="log">
-                @for (t of transactions(); track t.id) {
-                  <div class="log-entry" [class.log-buy]="t.action === 'buy'" [class.log-sell]="t.action === 'sell'">
-                    <strong [class.pos]="t.action === 'buy'" [class.neg]="t.action === 'sell'">
-                      {{ t.action === 'buy' ? 'KAUF' : 'VERKAUF' }} {{ t.ticker }}
-                    </strong>
-                    — {{ t.shares | number: '1.4-4' }} Stk. &#64; {{ t.price | number: '1.2-2' }} CHF
-                    (Gebühr {{ t.fee | number: '1.2-2' }} CHF
-                    @if (t.realized_pnl !== null) {
-                      · PnL <span [class.pos]="t.realized_pnl >= 0" [class.neg]="t.realized_pnl < 0">{{ t.realized_pnl | number: '1.2-2' }} CHF</span>
-                    })
-                    <div class="log-meta">{{ t.reason }}</div>
-                    <div class="log-meta">{{ t.created_at | date: 'short' }}</div>
-                  </div>
-                }
-              </div>
-            }
-          </div>
         </div>
-      }
+      </div>
+
+      <div [hidden]="activeTab() !== 'transactions'" class="tx-wide">
+        <div class="card">
+          <h3>Transaktionshistorie</h3>
+          @if (transactions().length === 0) {
+            <p class="muted">Noch keine Transaktionen.</p>
+          } @else {
+            <div class="tx-summary muted">
+              {{ transactions().length }} Transaktionen ·
+              {{ buyCount() }} Käufe · {{ sellCount() }} Verkäufe ·
+              Gesamtgebühren {{ totalFeesInLog() | number: '1.2-2' }} CHF
+            </div>
+            <div class="tx-table-wrap">
+              <table class="tx-table">
+                <colgroup>
+                  <col class="col-date" />
+                  <col class="col-action" />
+                  <col class="col-ticker" />
+                  <col class="col-shares" />
+                  <col class="col-price" />
+                  <col class="col-fee" />
+                  <col class="col-gross" />
+                  <col class="col-pnl" />
+                  <col class="col-reason" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>Datum</th>
+                    <th>Aktion</th>
+                    <th>Ticker</th>
+                    <th>Menge</th>
+                    <th>Kurs</th>
+                    <th>Gebühr</th>
+                    <th>Brutto</th>
+                    <th>PnL</th>
+                    <th>Begründung</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (t of transactions(); track t.id) {
+                    <tr [class.tx-buy]="t.action === 'buy'" [class.tx-sell]="t.action === 'sell'">
+                      <td class="nowrap">{{ t.created_at | date: 'dd.MM.yy HH:mm' }}</td>
+                      <td>
+                        <span class="badge" [class.badge-organic]="t.action === 'buy'" [class.badge-blocked]="t.action === 'sell'">
+                          {{ t.action === 'buy' ? 'KAUF' : 'VERKAUF' }}
+                        </span>
+                      </td>
+                      <td class="ticker">{{ t.ticker }}</td>
+                      <td class="nowrap">{{ t.shares | number: '1.4-4' }}</td>
+                      <td class="nowrap">{{ t.price | number: '1.2-2' }} CHF</td>
+                      <td class="nowrap">{{ t.fee | number: '1.2-2' }} CHF</td>
+                      <td class="nowrap">{{ t.gross_amount | number: '1.2-2' }} CHF</td>
+                      <td class="nowrap">
+                        @if (t.realized_pnl !== null) {
+                          <span [class.pos]="t.realized_pnl >= 0" [class.neg]="t.realized_pnl < 0">{{ t.realized_pnl | number: '1.2-2' }} CHF</span>
+                        } @else {
+                          <span class="muted">—</span>
+                        }
+                      </td>
+                      <td class="tx-reason">{{ t.reason }}</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          }
+        </div>
+      </div>
     }
   `,
   styles: [
     `
       .section-title { margin-top: 2rem; margin-bottom: 0.25rem; }
-      .section-subtitle { color: #666; margin-bottom: 1rem; font-size: 0.85rem; }
       .grid-top { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
       .grid-mid { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; margin-bottom: 1rem; }
       .grid-bot { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
+      .grid-bot-single { grid-template-columns: 1fr; }
+      .tx-wide {
+        position: relative;
+        left: 50%;
+        transform: translateX(-50%);
+        width: calc(100vw - 2rem);
+        max-width: 1180px;
+        box-sizing: border-box;
+      }
+      @media (max-width: 1180px) {
+        .tx-wide { position: static; left: auto; transform: none; width: auto; max-width: none; }
+      }
       @media (max-width: 900px) {
         .grid-top, .grid-mid, .grid-bot { grid-template-columns: 1fr; }
       }
@@ -222,6 +306,7 @@ Chart.register(...registerables);
       .neg { color: #c0392b; }
       .neu { color: #c98a00; }
       .muted { color: #888; font-size: 0.85rem; }
+      .loading-note { margin: 0 0 0.75rem; }
       .chart-wrap { position: relative; height: 220px; }
       .chart-empty {
         position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -257,11 +342,40 @@ Chart.register(...registerables);
         transform: translateX(-50%);
       }
       .exit-bar-labels { display: flex; justify-content: space-between; font-size: 0.65rem; color: #aaa; margin-top: 5px; }
-      .log { max-height: 340px; overflow-y: auto; font-size: 0.8rem; }
-      .log-entry { padding: 8px 10px; margin-bottom: 6px; border-radius: 6px; border-left: 3px solid #ddd; background: #fafafa; line-height: 1.5; }
-      .log-buy { border-color: #1a8a3c; }
-      .log-sell { border-color: #c0392b; }
-      .log-meta { color: #888; font-size: 0.7rem; }
+      .tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; border-bottom: 1px solid #e2e2e2; }
+      .tab {
+        background: none; border: none; cursor: pointer; padding: 0.5rem 0.9rem;
+        font-size: 0.85rem; font-weight: 600; color: #888; border-bottom: 2px solid transparent;
+        display: flex; align-items: center; gap: 6px; margin-bottom: -1px;
+      }
+      .tab.active { color: #ff4500; border-bottom-color: #ff4500; }
+      .tab-count {
+        background: #eee; color: #666; font-size: 0.68rem; font-weight: 700;
+        border-radius: 20px; padding: 1px 7px;
+      }
+      .tab.active .tab-count { background: #ffe3d6; color: #ff4500; }
+      .tx-summary { margin-bottom: 0.75rem; }
+      .tx-table-wrap { max-height: 560px; overflow-y: auto; overflow-x: hidden; }
+      .tx-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 0.78rem; }
+      .tx-table col.col-date { width: 13%; }
+      .tx-table col.col-action { width: 8%; }
+      .tx-table col.col-ticker { width: 8%; }
+      .tx-table col.col-shares { width: 9%; }
+      .tx-table col.col-price,
+      .tx-table col.col-fee,
+      .tx-table col.col-gross,
+      .tx-table col.col-pnl { width: 10%; }
+      .tx-table col.col-reason { width: 22%; }
+      .tx-table th {
+        text-align: left; font-size: 0.68rem; text-transform: uppercase; letter-spacing: .05em;
+        color: #888; padding: 6px 8px; border-bottom: 1px solid #e2e2e2; position: sticky; top: 0; background: #fafafa;
+      }
+      .tx-table td { padding: 6px 8px; border-bottom: 1px solid #eee; vertical-align: top; }
+      .tx-table tr:last-child td { border-bottom: none; }
+      .tx-table tr.tx-buy td:first-child { border-left: 3px solid #1a8a3c; }
+      .tx-table tr.tx-sell td:first-child { border-left: 3px solid #c0392b; }
+      .nowrap { word-break: break-word; }
+      .tx-reason { color: #888; font-size: 0.74rem; word-break: break-word; }
       .notice { background: #fff8e1; border: 1px solid #ffe082; border-radius: 8px; padding: 1rem; }
       .error { background: #fdecea; border: 1px solid #f5c6cb; color: #a12622; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; }
     `,
@@ -272,6 +386,8 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
 
   // Mirrors the constants in supabase/functions/market-scan/index.ts — shown
   // in the UI so it's clear at which thresholds a position would be closed.
+  protected readonly activeTab = signal<'overview' | 'transactions'>('overview');
+
   protected readonly takeProfit = 0.04;
   protected readonly stopLoss = -0.035;
   protected readonly maxPositions = 5;
@@ -366,6 +482,18 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   /** Sum of all open positions' mark-to-market value (using latest signal prices where available). */
   protected positionsValue(): number {
     return this.positions().reduce((sum, p) => sum + (this.currentPrice(p.ticker) ?? p.entry_price) * p.shares, 0);
+  }
+
+  protected buyCount(): number {
+    return this.transactions().filter((t) => t.action === 'buy').length;
+  }
+
+  protected sellCount(): number {
+    return this.transactions().filter((t) => t.action === 'sell').length;
+  }
+
+  protected totalFeesInLog(): number {
+    return this.transactions().reduce((sum, t) => sum + t.fee, 0);
   }
 
   /**
