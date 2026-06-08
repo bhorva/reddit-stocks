@@ -21,14 +21,19 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 
-// Kept in sync with `market-scan` — see the detailed breakeven-math comment
-// there for why TAKE_PROFIT was raised from 0.04: at the typical ~12%-of-
-// portfolio position size, Swissquote's brokerage fee + ~0.95% FX margin
-// (each way) add up to roughly 6.3% of the position, so a +4% "win" actually
-// cost the portfolio money once entry costs are counted too. 8% leaves
-// genuine profit margin above that breakeven.
-const TAKE_PROFIT = 0.08;
-const STOP_LOSS = -0.035;
+// Kept in sync with `market-scan` — see the detailed strategy-constants
+// comment there for the full reasoning. Short version: Swissquote's ~6.3%
+// round-trip cost (brokerage + FX margin, EACH WAY) hits every exit, win or
+// lose, so single-digit-percent thresholds (the original ±2.5%/±4% pump-&-dip
+// shape, and even the later ±8%/±3.5% iteration) make the strategy
+// structurally unprofitable — e.g. ±8%/±3.5% nets roughly +1.7% on wins vs.
+// -9.8% on losses, requiring an ~85% hit rate just to break even. The
+// strategy is now SWING-shaped instead (days-to-weeks holds, larger targets),
+// which keeps that ~6.3% tax a small fraction of the targeted move:
+//   net win  ≈ 0.20 - 0.063 ≈ +13.7%   net loss ≈ -0.06 - 0.063 ≈ -12.3%
+//   → breakeven hit rate ≈ 47%, a realistic bar for a heuristic with an edge.
+const TAKE_PROFIT = 0.2;
+const STOP_LOSS = -0.06;
 
 // Currency-conversion spread Swissquote charges on USD-denominated trades from
 // a CHF account — kept in sync with the same constant in `market-scan`.

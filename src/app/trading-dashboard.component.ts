@@ -629,13 +629,17 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   protected readonly activeTab = signal<'overview' | 'transactions'>('overview');
 
   // Mirrors the constants in both Edge Functions — see market-scan's
-  // breakeven-math comment for why TAKE_PROFIT is 0.08, not the more
-  // intuitive-looking 0.04: round-trip Swissquote fees + FX margin on a
-  // ~12%-of-portfolio position add up to ~6.3%, so anything below that isn't
-  // a real win once entry costs (which `realized_pnl` now also accounts for)
-  // are counted.
-  protected readonly takeProfit = 0.08;
-  protected readonly stopLoss = -0.035;
+  // strategy-constants comment for the full reasoning. Short version: with
+  // Swissquote's ~6.3% round-trip cost (brokerage + FX margin, EACH WAY,
+  // hitting every exit regardless of win/lose), single-digit-percent
+  // thresholds make the strategy structurally unprofitable (an ±8%/±3.5%
+  // pair nets roughly +1.7% on wins vs. -9.8% on losses — an ~85% hit rate
+  // just to break even). The strategy is now SWING-shaped — larger targets
+  // over days-to-weeks holds — so that ~6.3% tax stays a small fraction of
+  // the targeted move: net win ≈ +13.7%, net loss ≈ -12.3%, breakeven hit
+  // rate ≈ 47%, a realistic bar for a heuristic with a genuine edge.
+  protected readonly takeProfit = 0.2;
+  protected readonly stopLoss = -0.06;
   protected readonly maxPositions = 5;
 
   @ViewChild('chartCanvas') private chartCanvas?: ElementRef<HTMLCanvasElement>;
@@ -882,7 +886,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   }
 
   /**
-   * Maps a position's current change-since-entry (e.g. -0.035 .. +0.04) onto a
+   * Maps a position's current change-since-entry (e.g. -0.06 .. +0.20) onto a
    * 0-100% horizontal position for the exit-range bar, which spans a bit
    * wider than [stopLoss, takeProfit] so the marker doesn't sit at the very
    * edge even when a position is right at its trigger.

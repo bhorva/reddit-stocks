@@ -8,7 +8,9 @@
 //   2. correlates mention counts with crowd sentiment and price history,
 //      and fetches each candidate's price (Yahoo Finance, no API key needed)
 //   3. classifies the signal as organic / spike / pure-hype
-//   4. applies the pump-&-dip trading strategy and logs every trade
+//   4. applies the swing-trading strategy and logs every trade (see the
+//      strategy-constants block below for why it's swing- rather than
+//      pump-&-dip-shaped — the latter doesn't survive Swissquote's fees)
 //   5. records a portfolio balance snapshot for the chart
 //
 // Tickers with an open position are always re-evaluated (so we can sell even
@@ -50,20 +52,49 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 
-// ── Strategy constants (mirrors the file.html prototype) ────────────────
+// ── Strategy constants ───────────────────────────────────────────────────
+// Originally a fast "pump & dip" reactor mirroring the file.html prototype
+// (±2.5%/±4% thresholds, react every 6h). That shape cannot survive contact
+// with Swissquote's real cost structure: EVERY round trip — win or lose —
+// pays roughly 6.3% in brokerage commission + FX margin (see FX_FEE_RATE and
+// swissquoteFee() below). That's a near-fixed tax on each trade, not
+// something a bigger take-profit alone can fix: raising TAKE_PROFIT from 4%
+// to 8% (an earlier iteration of this constant) only made the asymmetry
+// worse — net win ≈ +1.7%, net loss ≈ -9.8%, which requires an ~85% hit rate
+// just to break even. No realistic heuristic clears that bar.
+//
+// So the strategy is now modelled as SWING trading: fewer, larger moves over
+// days-to-weeks rather than many small reactions every few hours. That makes
+// the ~6.3% round-trip tax a much smaller fraction of the targeted move, and
+// brings the breakeven hit rate down to something a genuine (if modest) edge
+// can plausibly clear — see the math at TAKE_PROFIT/STOP_LOSS below. Exits
+// are still checked every ~6h here and every ~15-30min by `price-refresh`,
+// so a swing target is never "missed" for lack of looking.
 const POSITION_SIZE = 0.12; // fraction of total portfolio value per buy
-const DIP_THRESH = -0.025; // buy once price has dropped this much from its recent high
 
-// TAKE_PROFIT must clear the round-trip transaction cost, or "success" is an
-// illusion. For a ~12%-of-portfolio position (~1'160 CHF investable after
-// entry fees), Swissquote's brokerage fee (~25 CHF each way, at this size) +
-// the ~0.95% FX margin (each way) add up to roughly 6.3% of the position —
-// i.e. a +4% "win" actually loses the portfolio ~25 CHF once the entry costs
-// (which `realized_pnl` now correctly subtracts, see the sell branch below)
-// are counted. 8% leaves a comfortable ~1.5%-of-position margin above that
-// breakeven, so a take-profit exit is a genuine win, not a disguised loss.
-const TAKE_PROFIT = 0.08; // sell once a position gains this much
-const STOP_LOSS = -0.035; // sell once a position loses this much — a risk cut, not a profit target, so it doesn't need to clear the fee hurdle
+// A swing entry wants a real pullback into a base, not a blip that fully
+// reverts before the next scan even looks at it — -2.5% is noise on a
+// multi-week chart. Widened to -4%, and (see the buy-check below) now
+// measured against a multi-week high rather than an intraday wiggle, so the
+// signal means "this stock pulled back meaningfully," not "it dipped for an
+// hour."
+const DIP_THRESH = -0.04; // buy once price has dropped this much from its recent (multi-week) high
+
+// TAKE_PROFIT / STOP_LOSS sized for SWING trades. The ~6.3% round-trip tax
+// (≈25 CHF Swissquote commission + ~0.95% FX margin EACH WAY on a ~12%-of-
+// portfolio position) hits every exit, win or lose — so what matters isn't
+// "does the winning side clear it" but how it reshapes BOTH sides:
+//
+//   net win  ≈ TAKE_PROFIT - 0.063  =  0.20 - 0.063  ≈ +13.7%
+//   net loss ≈ STOP_LOSS   - 0.063  = -0.06 - 0.063  ≈ -12.3%
+//   breakeven hit rate = |net loss| / (net win + |net loss|) ≈ 47%
+//
+// ~47% is a realistic bar — a heuristic with a genuine, if modest, edge can
+// clear it — versus the ~85% the previous ±8%/±3.5% pair implied. The two
+// net outcomes are also now close to symmetric, so profitability isn't
+// hostage to an unrealistically lopsided hit rate in either direction.
+const TAKE_PROFIT = 0.20; // sell once a position gains this much
+const STOP_LOSS = -0.06; // sell once a position loses this much
 const MAX_POSITIONS = 5;
 const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 
@@ -467,6 +498,17 @@ Deno.serve(async () => {
     if (portfolioError) throw portfolioError;
     const portfolio = portfolioRow as PortfolioRow;
 
+    // `blocked_count`/`blocked_capital` describe THIS run's "how much did we
+    // choose not to risk just now" — not a lifetime total. Resetting them
+    // here (rather than letting them accumulate across every 6-hourly run
+    // forever) is what keeps the dashboard's "X CHF nicht riskiert" stat
+    // meaningful: a lifetime sum would grow without bound — after a year of
+    // ~4 runs/day with, say, 2 blocks each at ~1'200 CHF, it would already
+    // read in the millions, telling the user nothing about the PORTFOLIO's
+    // current state, only about how long the bot has been running.
+    portfolio.blocked_count = 0;
+    portfolio.blocked_capital = 0;
+
     const { data: openPositions, error: positionsError } = await supabase
       .from('positions')
       .select('*');
@@ -670,14 +712,16 @@ Deno.serve(async () => {
         verdict === 'organic' &&
         positions.length < MAX_POSITIONS
       ) {
-        // Recent high comes from INTRADAY data (last ~5 trading days of 30-min
-        // bars) rather than daily closes — a -2.5% "dip from the recent high"
-        // measured against daily closes is a coarse, stale signal that a fast
-        // intraday swing can fully revert before the next 6-hourly scan even
-        // looks at it. Falls back to the daily series if Yahoo's intraday
-        // endpoint had nothing for this ticker.
-        const highSource = intradayHistory.length > 0 ? intradayHistory : dailyHistory;
-        const recentHigh = Math.max(...highSource);
+        // For a SWING entry, "the recent high" should mean a meaningful
+        // multi-week reference point, not an intraday wiggle — measuring
+        // against ~30 daily closes (≈6 weeks) means DIP_THRESH represents
+        // "this stock pulled back materially from its recent range," which is
+        // what a swing setup actually wants. (Using intraday data here, as an
+        // earlier iteration did, would trigger on noise: a stock can dip 4%
+        // for an hour and fully revert by the next scan — not a base worth
+        // swinging into.) `price` itself still comes from the freshest
+        // intraday close (see above) — only the reference HIGH is long-range.
+        const recentHigh = Math.max(...dailyHistory);
         const dropFromHigh = (price - recentHigh) / recentHigh;
         if (dropFromHigh <= DIP_THRESH) {
           const totalValue =
@@ -720,7 +764,7 @@ Deno.serve(async () => {
                 currency: 'USD',
                 gross_amount: grossAmount,
                 signal_snapshot: signalSnapshot,
-                reason: `Dip erkannt: ${(dropFromHigh * 100).toFixed(1)}% unter dem Intraday-Hoch (${highSource.length} Kurspunkte), Hype organisch (Score ${hypeScore.toFixed(0)}, z=${zScore.toFixed(1)}) & von Stimmung/Kurs bestätigt.`,
+                reason: `Swing-Einstieg: ${(dropFromHigh * 100).toFixed(1)}% unter dem Mehrwochenhoch (${dailyHistory.length} Handelstage Historie), Hype organisch (Score ${hypeScore.toFixed(0)}, z=${zScore.toFixed(1)}) & von Stimmung/Kurs bestätigt.`,
               })
               .select()
               .single();
