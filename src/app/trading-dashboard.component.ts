@@ -252,8 +252,17 @@ interface MissedOpportunityView {
           </div>
         </div>
 
-        <div class="grid-mid">
-          <div class="card">
+        <!--
+          Deliberately NOT in a .grid-mid (2fr/1fr) row alongside the chart
+          anymore — "Watchlist & Signale" grew to 7 columns (Ticker, Typ,
+          Preis, Erwähnungen, Hype, Stimmung, Verdict) and a 1fr-wide slot
+          squeezed it into an unreadably cramped table. Both cards now get
+          the FULL container width as their own rows: the chart actually
+          benefits too (a wide line chart reads better than a squeezed one),
+          and the table finally has room to breathe without horizontal
+          scrolling or truncation.
+        -->
+        <div class="card">
             <h3>
               Portfolioentwicklung vs. SPY
               <span class="info-icon" tabindex="0" title="Die blaue Linie ist der Wert unseres simulierten Portfolios über die Zeit, die gestrichelte graue Linie das gleiche Startkapital einfach im Aktienindex-Fonds SPY (S&P 500) angelegt — beide auf denselben Startwert normiert, damit der Vergleich fair ist. Die rötliche Fläche zeigt den 'Drawdown' (Abstand vom bisherigen Höchststand); Dreiecke markieren Käufe (▲) und Verkäufe (▼), grün/rot je nach Ergebnis. Liegt die blaue Linie unter der grauen, hätte ein simpler Indexfonds besser abgeschnitten als die aktive Strategie.">ⓘ</span>
@@ -274,8 +283,9 @@ interface MissedOpportunityView {
                 was dasselbe Startkapital bei einer simplen Index-Anlage wert wäre.
               </p>
             }
-          </div>
-          <div class="card">
+        </div>
+
+        <div class="card">
             <h3>Watchlist &amp; Signale</h3>
             @if (signals().length === 0) {
               <p class="muted">Noch keine Signale erfasst.</p>
@@ -310,7 +320,6 @@ interface MissedOpportunityView {
                 }
               }
             }
-          </div>
         </div>
 
         <ng-template #signalTable let-rows="rows">
