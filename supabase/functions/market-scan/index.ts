@@ -105,7 +105,22 @@ const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 // watchlist trades in USD. See swissquote.com fee schedule ("Fremdwährungen").
 const FX_FEE_RATE = 0.0095;
 
-const HISTORY_LOOKBACK = 8; // how many past signal rows to use for the hype baseline
+// How many past `signals` rows feed the z-score baseline in `classify()`.
+// At the 6-hourly scan cadence, 8 rows ≈ 2 days — barely more than a single
+// weekend blip, and far too short to capture the weekday/weekend rhythm
+// Reddit chatter typically follows (e.g. noticeably quieter on weekends).
+// That made the baseline (and therefore the z-score and hype score) jumpy and
+// unstable — exactly the kind of noise a "rolling mean/stddev" baseline is
+// supposed to smooth out. 28 rows ≈ one full week (4 scans/day × 7 days):
+// long enough to span a complete weekday/weekend cycle and give the z-score
+// enough samples to be statistically meaningful, short enough that a newly
+// discovered ticker can build up a representative baseline within about a
+// week of joining the watchlist. Also brings this in line with the rest of
+// the engine, which is now uniformly "multi-week-minded" for swing trading
+// (the ~30-day price history, the ~3-4-week volume baseline, the multi-week
+// "recent high" for dip detection) — the old 2-day window was the one piece
+// still tuned for a fast pump-&-dip reaction loop.
+const HISTORY_LOOKBACK = 28; // how many past signal rows to use for the hype baseline
 
 // ── Dynamic ticker discovery ─────────────────────────────────────────────
 const CANDIDATE_POOL_SIZE = 25; // top mention-ranked candidates to validate against Yahoo Finance
