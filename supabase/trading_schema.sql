@@ -133,7 +133,10 @@ create policy "Public read access" on public.balance_history for select using (t
 --
 -- 2. Deploy the Edge Function (see supabase/functions/market-scan):
 --      supabase functions deploy market-scan
---      supabase secrets set REDDIT_CLIENT_ID=... REDDIT_CLIENT_SECRET=...
+--    No Reddit app/secrets needed — the function reads Reddit's public
+--    JSON endpoints (www.reddit.com/.../*.json) with just a User-Agent
+--    header, since self-service OAuth credential creation is now gated
+--    behind a multi-week manual review (see README "Trading-Simulation").
 --
 -- 3. Store the function URL and the service-role key as Vault secrets
 --    (Project Settings -> Vault), then schedule the job. Replace the

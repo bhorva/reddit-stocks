@@ -15,9 +15,16 @@
 // if they fall out of the "currently trending" set), everything else is
 // rotated in/out of `watchlist.active` based on what's hot this run.
 //
-// Required secrets (set with `supabase secrets set`):
-//   REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET — from a "script" app at
-//   https://www.reddit.com/prefs/apps
+// Reddit access: as of late 2025 Reddit no longer issues OAuth client
+// credentials to new developers on a self-service basis (manual review,
+// weeks-long wait, personal projects mostly rejected — see "Responsible
+// Builder Policy"). We therefore use Reddit's public, unauthenticated JSON
+// endpoints (`https://www.reddit.com/r/<sub>/hot.json`,
+// `.../search.json`) instead of `oauth.reddit.com`. These remain freely
+// readable without an app/registration — only a descriptive `User-Agent`
+// is required. Rate limits are looser than what a 6-hourly scan of three
+// subreddits needs.
+//
 // SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided automatically.
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
@@ -97,44 +104,28 @@ function swissquoteFee(amount: number): number {
   return 190;
 }
 
-// ── Reddit: OAuth2 client-credentials + mention search ──────────────────
-async function getRedditToken(): Promise<string> {
-  const clientId = Deno.env.get('REDDIT_CLIENT_ID');
-  const clientSecret = Deno.env.get('REDDIT_CLIENT_SECRET');
-  if (!clientId || !clientSecret) {
-    throw new Error('REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET secrets are not set');
-  }
-  const res = await fetch('https://www.reddit.com/api/v1/access_token', {
-    method: 'POST',
-    headers: {
-      Authorization: `Basic ${btoa(`${clientId}:${clientSecret}`)}`,
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'User-Agent': 'reddit-stocks-market-scan/1.0',
-    },
-    body: 'grant_type=client_credentials',
-  });
-  if (!res.ok) {
-    throw new Error(`Reddit auth failed: ${res.status} ${await res.text()}`);
-  }
-  const data = await res.json();
-  return data.access_token as string;
+// ── Reddit: public, unauthenticated JSON endpoints ──────────────────────
+// No app registration / OAuth needed — `www.reddit.com/.../*.json` is
+// readable by anyone as long as a descriptive User-Agent is sent (Reddit's
+// API rules require this to identify the client). This is the documented
+// fallback now that self-service OAuth credential creation is gated behind
+// a multi-week manual review that personal projects rarely pass.
+const REDDIT_USER_AGENT = 'web:reddit-stocks-market-scan:v1.0 (by /u/reddit-stocks-bot)';
+
+function redditHeaders(): HeadersInit {
+  return { 'User-Agent': REDDIT_USER_AGENT };
 }
 
 /** Counts how often $TICKER (or the bare ticker as a word) was mentioned in
  * the last 24h across the watched subreddits. */
-async function countRedditMentions(token: string, ticker: string): Promise<number> {
+async function countRedditMentions(ticker: string): Promise<number> {
   let total = 0;
   const since = Date.now() / 1000 - 24 * 60 * 60;
   for (const subreddit of REDDIT_SUBREDDITS) {
-    const url = `https://oauth.reddit.com/r/${subreddit}/search?q=${encodeURIComponent(
+    const url = `https://www.reddit.com/r/${subreddit}/search.json?q=${encodeURIComponent(
       ticker,
     )}&restrict_sr=1&sort=new&limit=50&t=day`;
-    const res = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'User-Agent': 'reddit-stocks-market-scan/1.0',
-      },
-    });
+    const res = await fetch(url, { headers: redditHeaders() });
     if (!res.ok) {
       console.warn(`Reddit search failed for r/${subreddit} ${ticker}: ${res.status}`);
       continue;
@@ -156,16 +147,11 @@ async function countRedditMentions(token: string, ticker: string): Promise<numbe
  * symbols (cashtags like "$NVDA" score higher than bare all-caps words like
  * "NVDA", since cashtags are an explicit, low-noise signal). Returns a score
  * per discovered symbol, highest first. */
-async function discoverTrendingTickers(token: string): Promise<[string, number][]> {
+async function discoverTrendingTickers(): Promise<[string, number][]> {
   const scores = new Map<string, number>();
   for (const subreddit of REDDIT_SUBREDDITS) {
-    const url = `https://oauth.reddit.com/r/${subreddit}/hot?limit=${DISCOVERY_POST_LIMIT}`;
-    const res = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'User-Agent': 'reddit-stocks-market-scan/1.0',
-      },
-    });
+    const url = `https://www.reddit.com/r/${subreddit}/hot.json?limit=${DISCOVERY_POST_LIMIT}`;
+    const res = await fetch(url, { headers: redditHeaders() });
     if (!res.ok) {
       console.warn(`Reddit hot listing failed for r/${subreddit}: ${res.status}`);
       continue;
@@ -281,7 +267,6 @@ Deno.serve(async () => {
     const positions = (openPositions ?? []) as PositionRow[];
     const positionTickers = new Set(positions.map((p) => p.ticker));
 
-    const redditToken = await getRedditToken();
     const latestPrices = new Map<string, number>();
 
     // ── Phase 1: discover what's currently trending on Reddit ───────────
@@ -289,7 +274,7 @@ Deno.serve(async () => {
     // validate each against Stooq (real ticker + has price data) until the
     // hot list is full. This naturally filters out slang that slipped past
     // the stopword list (e.g. invented acronyms with no matching security).
-    const ranked = await discoverTrendingTickers(redditToken);
+    const ranked = await discoverTrendingTickers();
     const hotPriceHistory = new Map<string, number[]>();
     for (const [symbol] of ranked.slice(0, CANDIDATE_POOL_SIZE)) {
       if (hotPriceHistory.size >= HOT_LIST_SIZE) break;
@@ -347,7 +332,7 @@ Deno.serve(async () => {
 
     for (const [ticker, priceHistory] of evaluationSet) {
       const [mentionCount, { data: history }] = await Promise.all([
-        countRedditMentions(redditToken, ticker),
+        countRedditMentions(ticker),
         supabase
           .from('signals')
           .select('ticker, scanned_at, price, mention_count, hype_score')

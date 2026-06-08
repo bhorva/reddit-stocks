@@ -62,14 +62,19 @@ Einmaliges Setup:
 1. **Tabellen anlegen**: [`supabase/trading_schema.sql`](supabase/trading_schema.sql)
    im Supabase SQL-Editor ausführen (legt Tabellen, Policies und eine
    Beispiel-Watchlist an).
-2. **Reddit-App erstellen**: auf https://www.reddit.com/prefs/apps eine App vom
-   Typ „script“ anlegen, um `client_id` und `client_secret` zu erhalten.
-3. **Function deployen und Secrets setzen**:
+2. **Function deployen**:
    ```bash
    supabase functions deploy market-scan
-   supabase secrets set REDDIT_CLIENT_ID=... REDDIT_CLIENT_SECRET=...
    ```
-4. **Cron aktivieren**: die Schritte am Ende von `supabase/trading_schema.sql`
+   Eine Reddit-App-Registrierung ist **nicht nötig**: Reddit hat die
+   selbstständige Erstellung von OAuth-Zugangsdaten Ende 2025 eingestellt
+   (manuelle Prüfung, mehrwöchige Wartezeit, persönliche Projekte werden
+   kaum bewilligt — Stichwort „Responsible Builder Policy“). Die Function
+   nutzt stattdessen Reddits öffentliche, unauthentifizierte JSON-Endpunkte
+   (`https://www.reddit.com/r/<sub>/hot.json`, `.../search.json`), die mit
+   einem aussagekräftigen `User-Agent`-Header frei lesbar bleiben — völlig
+   ausreichend für einen 6-stündlichen Scan dreier Subreddits.
+3. **Cron aktivieren**: die Schritte am Ende von `supabase/trading_schema.sql`
    ausführen (Extensions `pg_cron`/`pg_net` aktivieren, Function-URL und
    Service-Role-Key im Vault hinterlegen, Job mit `cron.schedule(...)` anlegen).
 
