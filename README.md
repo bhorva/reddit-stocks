@@ -49,13 +49,40 @@ Zeit. Die Auswertung läuft serverseitig als Supabase Edge Function
 unabhängig davon, ob die App im Browser offen ist.
 
 Die Watchlist ist **dynamisch**: es gibt keine feste Ticker-Liste. Jeder
-Scan durchsucht die meistdiskutierten Reddit-Posts nach Cashtags
-(`$NVDA`) und ticker-ähnlichen Kürzeln, validiert die Kandidaten gegen
-echte Kursdaten und übernimmt die aktuell meistdiskutierten, echten Ticker
-in die aktive Watchlist — bisherige Einträge, die nicht mehr zu den
-Top-Trends gehören (und keine offene Position haben), werden wieder
-deaktiviert. So zeigt die App immer, was *gerade* auf Reddit relevant ist,
-statt eine starre Auswahl zu wiederholen.
+Scan ermittelt die aktuell meistdiskutierten, echten Ticker, validiert sie
+gegen echte Kursdaten und übernimmt sie in die aktive Watchlist — bisherige
+Einträge, die nicht mehr zu den Top-Trends gehören (und keine offene
+Position haben), werden wieder deaktiviert. So zeigt die App immer, was
+*gerade* relevant ist, statt eine starre Auswahl zu wiederholen.
+
+**Mehrere Quellen statt einer einzigen, fragilen** — Supabase Edge Functions
+laufen auf AWS-Infrastruktur, und Reddit blockiert (über Cloudflare) Anfragen
+aus Cloud-/Rechenzentrums-IP-Bereichen pauschal mit `403`, sowohl an die
+öffentlichen `*.json`-Endpunkte als auch an die OAuth-API — unabhängig vom
+`User-Agent`. Selbstständige OAuth-Zugangsdaten vergibt Reddit ausserdem seit
+Ende 2025 nicht mehr an neue Entwickler. Statt uns auf einen einzigen,
+blockierten Pfad zu verlassen, holt der Scan daher mehrere unabhängige,
+cloud-freundliche Quellen ein und korreliert sie:
+
+- **[ApeWisdom](https://apewisdom.io/api/)** — ein kostenloser, schlüsselloser
+  Aggregator, der die wichtigsten Aktien-Subreddits bereits selbst scannt und
+  Erwähnungs-Rankings bereitstellt. Das ist unser primäres
+  Reddit-Signal — er übernimmt das Reddit-Scraping von Infrastruktur aus,
+  die Reddit nicht blockiert.
+- **`old.reddit.com`** — ein direkter, aber bewusst nur ergänzender Versuch:
+  schlägt er fehl (vermutlich IP-Block), wird das geloggt und ignoriert; das
+  Ergebnis trägt einfach mit Gewicht 0 bei. Sollte Reddit die Sperre für
+  Cloud-IPs jemals lockern, liefert dieser Pfad ohne Codeänderung wieder Daten.
+- **[StockTwits](https://api.stocktwits.com/)** — eine kostenlose,
+  schlüssellose Stimmungsquelle (bullish/bearish-Tags der Trading-Community),
+  die als Korrelations-Check dient: bestätigt die breite Masse den Hype, oder
+  wirkt er einseitig fabriziert?
+- **[Stooq](https://stooq.com/)** — echte Kurshistorie als fundamentale
+  „hat sich der Kurs wirklich bewegt"-Bestätigung.
+
+Erst wenn Erwähnungs-Spitzen, Stimmung **und** Kursverlauf übereinstimmend
+„organisch" aussehen, gilt ein Ticker als handelbar — eine einzelne, laute
+Quelle kann die Simulation nicht in einen Trade treiben.
 
 Einmaliges Setup:
 

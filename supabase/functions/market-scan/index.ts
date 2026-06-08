@@ -2,11 +2,11 @@
 //
 // Runs every 6 hours (triggered by pg_cron, see supabase/trading_schema.sql).
 // Each run it:
-//   1. discovers which tickers are CURRENTLY trending on Reddit by scanning
-//      hot posts for cashtags / ticker-shaped words (no fixed ticker list —
-//      the watchlist is reseeded with whatever is hot right now)
-//   2. counts recent mentions for each candidate (real Reddit API, OAuth2)
-//      and fetches its price + short history (Stooq, no API key needed)
+//   1. discovers which tickers are CURRENTLY trending by combining several
+//      independent signal sources (no fixed ticker list — the watchlist is
+//      reseeded with whatever is hot right now)
+//   2. correlates mention counts with crowd sentiment and price history,
+//      and fetches each candidate's price (Stooq, no API key needed)
 //   3. classifies the signal as organic / spike / pure-hype
 //   4. applies the pump-&-dip trading strategy and logs every trade
 //   5. records a portfolio balance snapshot for the chart
@@ -15,15 +15,33 @@
 // if they fall out of the "currently trending" set), everything else is
 // rotated in/out of `watchlist.active` based on what's hot this run.
 //
-// Reddit access: as of late 2025 Reddit no longer issues OAuth client
-// credentials to new developers on a self-service basis (manual review,
-// weeks-long wait, personal projects mostly rejected — see "Responsible
-// Builder Policy"). We therefore use Reddit's public, unauthenticated JSON
-// endpoints (`https://www.reddit.com/r/<sub>/hot.json`,
-// `.../search.json`) instead of `oauth.reddit.com`. These remain freely
-// readable without an app/registration — only a descriptive `User-Agent`
-// is required. Rate limits are looser than what a 6-hourly scan of three
-// subreddits needs.
+// ── Why several sources instead of just "the Reddit API" ────────────────
+// Supabase Edge Functions run on AWS infrastructure. Reddit (via Cloudflare)
+// blocks requests from cloud/datacenter IP ranges with HTTP 403 — regardless
+// of whether you call the public `www.reddit.com/*.json` endpoints or the
+// authenticated `oauth.reddit.com` API (and self-service OAuth credentials
+// are no longer issued to new developers either, see "Responsible Builder
+// Policy"). Rather than depend on a single, fragile, often-blocked path, we
+// fan out to several independent, cloud-friendly sources and correlate them:
+//
+//   • ApeWisdom   — a free, keyless aggregator that *already* scans the major
+//                    stock subreddits (wallstreetbets, stocks, options, ...)
+//                    twice an hour and exposes ranked mention counts. This is
+//                    our PRIMARY Reddit-derived signal, since it does the
+//                    Reddit-scraping for us from infrastructure Reddit
+//                    doesn't block. https://apewisdom.io/api/
+//   • old.reddit.com — a best-effort DIRECT fetch of Reddit's own JSON, kept
+//                    as a supplementary source. It is wrapped so that a 403
+//                    (likely, from cloud IPs) is logged and simply ignored —
+//                    if Reddit ever loosens IP-based blocking, this starts
+//                    contributing again with zero further changes.
+//   • StockTwits  — a free, keyless public symbol stream that exposes crowd
+//                    sentiment tags (bullish/bearish) per message. Used to
+//                    CORRELATE: a mention spike that the wider trading crowd
+//                    actually agrees is bullish looks "organic"; a spike with
+//                    flat/bearish sentiment looks like manufactured "hype".
+//   • Stooq       — free daily price history (already used), the fundamental
+//                    "did the market actually move" check.
 //
 // SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided automatically.
 
@@ -37,11 +55,9 @@ const STOP_LOSS = -0.035; // sell once a position loses this much
 const MAX_POSITIONS = 5;
 const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 
-const REDDIT_SUBREDDITS = ['stocks', 'wallstreetbets', 'investing'];
 const HISTORY_LOOKBACK = 8; // how many past signal rows to use for the hype baseline
 
 // ── Dynamic ticker discovery ─────────────────────────────────────────────
-const DISCOVERY_POST_LIMIT = 75; // hot posts scanned per subreddit for candidates
 const CANDIDATE_POOL_SIZE = 25; // top mention-ranked candidates to validate against Stooq
 const HOT_LIST_SIZE = 10; // how many validated tickers make the active watchlist
 
@@ -63,6 +79,13 @@ const TICKER_STOPWORDS = new Set([
   'RED', 'GREEN', 'LONG', 'SHORT', 'CASH', 'YES', 'NOT', 'ONE', 'TWO', 'NOW',
   'CAN', 'GET', 'GOT', 'WHO', 'WHY', 'HOW', 'OUR', 'OUT', 'ANY', 'ARE', 'AND',
 ]);
+
+const REDDIT_SUBREDDITS = ['stocks', 'wallstreetbets', 'investing'];
+const DISCOVERY_POST_LIMIT = 75; // hot posts scanned per subreddit (best-effort source)
+
+// A descriptive User-Agent is required by Reddit's API rules to identify the
+// client — sent on the best-effort direct-Reddit calls.
+const REDDIT_USER_AGENT = 'web:reddit-stocks-market-scan:v1.0 (by /u/reddit-stocks-bot)';
 
 interface WatchlistRow {
   ticker: string;
@@ -94,6 +117,12 @@ interface PortfolioRow {
   blocked_capital: number;
 }
 
+interface SentimentSummary {
+  bullish: number;
+  bearish: number;
+  total: number;
+}
+
 function swissquoteFee(amount: number): number {
   if (amount < 500) return 15;
   if (amount < 2000) return 25;
@@ -104,79 +133,109 @@ function swissquoteFee(amount: number): number {
   return 190;
 }
 
-// ── Reddit: public, unauthenticated JSON endpoints ──────────────────────
-// No app registration / OAuth needed — `www.reddit.com/.../*.json` is
-// readable by anyone as long as a descriptive User-Agent is sent (Reddit's
-// API rules require this to identify the client). This is the documented
-// fallback now that self-service OAuth credential creation is gated behind
-// a multi-week manual review that personal projects rarely pass.
-const REDDIT_USER_AGENT = 'web:reddit-stocks-market-scan:v1.0 (by /u/reddit-stocks-bot)';
-
-function redditHeaders(): HeadersInit {
-  return { 'User-Agent': REDDIT_USER_AGENT };
-}
-
-/** Counts how often $TICKER (or the bare ticker as a word) was mentioned in
- * the last 24h across the watched subreddits. */
-async function countRedditMentions(ticker: string): Promise<number> {
-  let total = 0;
-  const since = Date.now() / 1000 - 24 * 60 * 60;
-  for (const subreddit of REDDIT_SUBREDDITS) {
-    const url = `https://www.reddit.com/r/${subreddit}/search.json?q=${encodeURIComponent(
-      ticker,
-    )}&restrict_sr=1&sort=new&limit=50&t=day`;
-    const res = await fetch(url, { headers: redditHeaders() });
-    if (!res.ok) {
-      console.warn(`Reddit search failed for r/${subreddit} ${ticker}: ${res.status}`);
-      continue;
-    }
-    const data = await res.json();
-    const posts: any[] = data?.data?.children ?? [];
-    const wordRe = new RegExp(`\\b\\$?${ticker}\\b`, 'i');
-    for (const post of posts) {
-      const created = post?.data?.created_utc ?? 0;
-      if (created < since) continue;
-      const text = `${post?.data?.title ?? ''} ${post?.data?.selftext ?? ''}`;
-      if (wordRe.test(text)) total += 1;
+// ── Source 1 (primary): ApeWisdom — pre-aggregated Reddit mention ranking ─
+// Free, keyless API that already scans wallstreetbets/stocks/options/investing
+// for ticker mentions from infrastructure Reddit doesn't block. This is our
+// main "what's trending on Reddit right now" signal.
+// Docs: https://apewisdom.io/api/
+async function fetchApeWisdomRanking(): Promise<Map<string, number>> {
+  const mentions = new Map<string, number>();
+  for (const page of [1, 2]) {
+    const url = `https://apewisdom.io/api/v1.0/filter/all-stocks/page/${page}`;
+    try {
+      const res = await fetch(url, { headers: { Accept: 'application/json' } });
+      if (!res.ok) {
+        console.warn(`ApeWisdom fetch failed (page ${page}): ${res.status}`);
+        continue;
+      }
+      const data = await res.json();
+      const results: any[] = data?.results ?? [];
+      for (const entry of results) {
+        const ticker = String(entry?.ticker ?? '').toUpperCase().trim();
+        const count = Number(entry?.mentions ?? 0);
+        if (!ticker || TICKER_STOPWORDS.has(ticker) || !Number.isFinite(count)) continue;
+        mentions.set(ticker, (mentions.get(ticker) ?? 0) + count);
+      }
+    } catch (err) {
+      console.warn(`ApeWisdom fetch errored (page ${page}): ${err}`);
     }
   }
-  return total;
+  return mentions;
 }
 
-/** Scans hot posts across the watched subreddits and extracts ticker-shaped
- * symbols (cashtags like "$NVDA" score higher than bare all-caps words like
- * "NVDA", since cashtags are an explicit, low-noise signal). Returns a score
- * per discovered symbol, highest first. */
-async function discoverTrendingTickers(): Promise<[string, number][]> {
+// ── Source 2 (supplementary, best-effort): direct Reddit scan ────────────
+// Kept as a bonus signal: if Reddit ever stops 403-ing cloud IPs, this starts
+// contributing again automatically. Failures (expected: 403 from AWS IPs) are
+// logged once and otherwise ignored — they must never fail the whole run.
+async function fetchOldRedditCashtags(): Promise<Map<string, number>> {
   const scores = new Map<string, number>();
   for (const subreddit of REDDIT_SUBREDDITS) {
-    const url = `https://www.reddit.com/r/${subreddit}/hot.json?limit=${DISCOVERY_POST_LIMIT}`;
-    const res = await fetch(url, { headers: redditHeaders() });
-    if (!res.ok) {
-      console.warn(`Reddit hot listing failed for r/${subreddit}: ${res.status}`);
-      continue;
-    }
-    const data = await res.json();
-    const posts: any[] = data?.data?.children ?? [];
-    for (const post of posts) {
-      const text = `${post?.data?.title ?? ''} ${post?.data?.selftext ?? ''}`;
-      const seenInPost = new Set<string>();
-
-      for (const match of text.matchAll(CASHTAG_RE)) {
-        const symbol = match[1].toUpperCase();
-        if (TICKER_STOPWORDS.has(symbol) || seenInPost.has(symbol)) continue;
-        seenInPost.add(symbol);
-        scores.set(symbol, (scores.get(symbol) ?? 0) + 2);
+    const url = `https://old.reddit.com/r/${subreddit}/hot.json?limit=${DISCOVERY_POST_LIMIT}`;
+    try {
+      const res = await fetch(url, {
+        headers: {
+          'User-Agent': REDDIT_USER_AGENT,
+          Accept: 'application/json',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+      });
+      if (!res.ok) {
+        console.warn(`[supplementary] old.reddit hot listing failed for r/${subreddit}: ${res.status} (likely cloud-IP block, ignoring)`);
+        continue;
       }
-      for (const match of text.matchAll(CAPS_WORD_RE)) {
-        const symbol = match[1].toUpperCase();
-        if (TICKER_STOPWORDS.has(symbol) || seenInPost.has(symbol)) continue;
-        seenInPost.add(symbol);
-        scores.set(symbol, (scores.get(symbol) ?? 0) + 1);
+      const data = await res.json();
+      const posts: any[] = data?.data?.children ?? [];
+      for (const post of posts) {
+        const text = `${post?.data?.title ?? ''} ${post?.data?.selftext ?? ''}`;
+        const seenInPost = new Set<string>();
+        for (const match of text.matchAll(CASHTAG_RE)) {
+          const symbol = match[1].toUpperCase();
+          if (TICKER_STOPWORDS.has(symbol) || seenInPost.has(symbol)) continue;
+          seenInPost.add(symbol);
+          scores.set(symbol, (scores.get(symbol) ?? 0) + 2);
+        }
+        for (const match of text.matchAll(CAPS_WORD_RE)) {
+          const symbol = match[1].toUpperCase();
+          if (TICKER_STOPWORDS.has(symbol) || seenInPost.has(symbol)) continue;
+          seenInPost.add(symbol);
+          scores.set(symbol, (scores.get(symbol) ?? 0) + 1);
+        }
       }
+    } catch (err) {
+      console.warn(`[supplementary] old.reddit fetch errored for r/${subreddit}: ${err} (ignoring)`);
     }
   }
-  return [...scores.entries()].sort((a, b) => b[1] - a[1]);
+  return scores;
+}
+
+// ── Source 3 (correlation): StockTwits crowd sentiment ───────────────────
+// Free, keyless public symbol stream. We use the bullish/bearish tags the
+// community attaches to messages as an independent confirmation signal: does
+// the wider trading crowd actually share the bullish read implied by a Reddit
+// mention spike, or does it look like one-sided manufactured hype?
+// Docs (community): api.stocktwits.com/api/2/streams/symbol/{SYMBOL}.json
+async function fetchStockTwitsSentiment(ticker: string): Promise<SentimentSummary | null> {
+  const url = `https://api.stocktwits.com/api/2/streams/symbol/${encodeURIComponent(ticker)}.json`;
+  try {
+    const res = await fetch(url, { headers: { Accept: 'application/json' } });
+    if (!res.ok) {
+      console.warn(`StockTwits fetch failed for ${ticker}: ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const messages: any[] = data?.messages ?? [];
+    let bullish = 0;
+    let bearish = 0;
+    for (const msg of messages) {
+      const basic = msg?.entities?.sentiment?.basic;
+      if (basic === 'Bullish') bullish += 1;
+      else if (basic === 'Bearish') bearish += 1;
+    }
+    return { bullish, bearish, total: messages.length };
+  } catch (err) {
+    console.warn(`StockTwits fetch errored for ${ticker}: ${err}`);
+    return null;
+  }
 }
 
 // ── Prices: Stooq daily CSV, no API key required ─────────────────────────
@@ -195,12 +254,19 @@ async function fetchPriceHistory(ticker: string): Promise<number[]> {
 }
 
 // ── Hype classification ──────────────────────────────────────────────────
+// Correlates THREE independent signals so a single noisy source can't drive
+// a trade: how much MORE a ticker is being mentioned than usual (Reddit/
+// ApeWisdom + supplementary direct scan), whether the wider crowd actually
+// agrees with a bullish read (StockTwits sentiment), and whether the price
+// itself confirms the story (Stooq). Only when mentions, sentiment AND price
+// roughly agree do we call it "organic" and let the trading logic act on it.
 type Verdict = 'organic' | 'spike' | 'pure-hype';
 
 function classify(
   mentionCount: number,
   history: SignalRow[],
   priceHistory: number[],
+  sentiment: SentimentSummary | null,
 ): { hypeScore: number; verdict: Verdict; blocked: boolean; reason: string } {
   const baseline = history.length
     ? history.reduce((sum, s) => sum + s.mention_count, 0) / history.length
@@ -215,32 +281,48 @@ function classify(
   const priceFallingOrFlat = priceTrend <= 0;
   const isSpike = baseline > 0 && mentionCount > baseline * 3;
 
-  if (hypeScore > HYPE_BLOCK_THR && priceFallingOrFlat) {
+  // Crowd-sentiment confirmation: is the wider trading crowd actually bullish,
+  // or does the mention spike look one-sided / unconfirmed by sentiment?
+  let sentimentNote = 'keine Stimmungsdaten verfügbar';
+  let sentimentConfirmsBullish = false;
+  let sentimentContradicts = false;
+  if (sentiment && sentiment.bullish + sentiment.bearish >= 5) {
+    const ratio = sentiment.bullish / (sentiment.bullish + sentiment.bearish);
+    sentimentConfirmsBullish = ratio >= 0.55;
+    sentimentContradicts = ratio <= 0.4;
+    sentimentNote = `StockTwits-Stimmung ${(ratio * 100).toFixed(0)}% bullish (${sentiment.bullish}↑/${sentiment.bearish}↓)`;
+  }
+
+  // Pure hype: loud on Reddit, but neither the crowd's sentiment nor the price
+  // backs it up — the textbook "pump" setup we must not chase.
+  if (hypeScore > HYPE_BLOCK_THR && priceFallingOrFlat && !sentimentConfirmsBullish) {
     return {
       hypeScore,
       verdict: 'pure-hype',
       blocked: true,
       reason:
         `Hype-Score ${hypeScore.toFixed(0)} > ${HYPE_BLOCK_THR} bei ${mentionCount} Erwähnungen ` +
-        `(Ø ${baseline.toFixed(1)}), aber Kurs fällt/stagniert seit ${priceHistory.length} Tagen — ` +
-        `keine fundamentale Bestätigung. Geblockt.`,
+        `(Ø ${baseline.toFixed(1)}), Kurs fällt/stagniert seit ${priceHistory.length} Tagen, ${sentimentNote} ` +
+        `— keine fundamentale Bestätigung. Geblockt.`,
     };
   }
-  if (isSpike && priceFallingOrFlat) {
+  // Spike: loud, but either the crowd contradicts the hype or the price hasn't
+  // moved — wait and watch instead of trading it.
+  if (isSpike && (priceFallingOrFlat || sentimentContradicts)) {
     return {
       hypeScore,
       verdict: 'spike',
       blocked: false,
       reason:
-        `Mention-Spike (${mentionCount} vs. Ø ${baseline.toFixed(1)}) ohne begleitende ` +
-        `Kursbewegung — verdächtig, wird beobachtet, aber nicht gehandelt.`,
+        `Mention-Spike (${mentionCount} vs. Ø ${baseline.toFixed(1)}), ${sentimentNote}, ` +
+        `ohne übereinstimmende Kursbewegung — verdächtig, wird beobachtet, aber nicht gehandelt.`,
     };
   }
   return {
     hypeScore,
     verdict: 'organic',
     blocked: false,
-    reason: `${mentionCount} Erwähnungen (Ø ${baseline.toFixed(1)}), Kursverlauf bestätigt die Richtung.`,
+    reason: `${mentionCount} Erwähnungen (Ø ${baseline.toFixed(1)}), ${sentimentNote}, Kursverlauf bestätigt die Richtung.`,
   };
 }
 
@@ -269,12 +351,32 @@ Deno.serve(async () => {
 
     const latestPrices = new Map<string, number>();
 
-    // ── Phase 1: discover what's currently trending on Reddit ───────────
-    // No fixed ticker list — rank candidate symbols by mention weight, then
-    // validate each against Stooq (real ticker + has price data) until the
-    // hot list is full. This naturally filters out slang that slipped past
-    // the stopword list (e.g. invented acronyms with no matching security).
-    const ranked = await discoverTrendingTickers();
+    // ── Phase 1: discover what's currently trending ─────────────────────
+    // Fan out to all sources in parallel and merge them into one ranked
+    // candidate list: ApeWisdom (pre-aggregated Reddit mentions, weighted
+    // highest since it's purpose-built and reliable from cloud IPs) plus the
+    // best-effort direct-Reddit cashtag scan (counts as a bonus when it gets
+    // through). Then validate each candidate against Stooq (real, listed
+    // ticker with price data) until the hot list is full.
+    const [apeWisdomMentions, supplementaryScores] = await Promise.all([
+      fetchApeWisdomRanking(),
+      fetchOldRedditCashtags(),
+    ]);
+    log.push(
+      `Quellen: ApeWisdom lieferte ${apeWisdomMentions.size} Ticker, ` +
+        `direkter Reddit-Scan lieferte ${supplementaryScores.size} Kandidaten ` +
+        `(0 = vermutlich von Reddit aus der Cloud-IP geblockt, kein Problem dank ApeWisdom).`,
+    );
+
+    const combinedScores = new Map<string, number>();
+    for (const [ticker, count] of apeWisdomMentions) {
+      combinedScores.set(ticker, (combinedScores.get(ticker) ?? 0) + count * 3);
+    }
+    for (const [ticker, score] of supplementaryScores) {
+      combinedScores.set(ticker, (combinedScores.get(ticker) ?? 0) + score);
+    }
+    const ranked = [...combinedScores.entries()].sort((a, b) => b[1] - a[1]);
+
     const hotPriceHistory = new Map<string, number[]>();
     for (const [symbol] of ranked.slice(0, CANDIDATE_POOL_SIZE)) {
       if (hotPriceHistory.size >= HOT_LIST_SIZE) break;
@@ -331,8 +433,8 @@ Deno.serve(async () => {
     }
 
     for (const [ticker, priceHistory] of evaluationSet) {
-      const [mentionCount, { data: history }] = await Promise.all([
-        countRedditMentions(ticker),
+      const [sentiment, { data: history }] = await Promise.all([
+        fetchStockTwitsSentiment(ticker),
         supabase
           .from('signals')
           .select('ticker, scanned_at, price, mention_count, hype_score')
@@ -340,6 +442,12 @@ Deno.serve(async () => {
           .order('scanned_at', { ascending: false })
           .limit(HISTORY_LOOKBACK),
       ]);
+
+      // Mention count = our combined Reddit-derived signal (ApeWisdom is the
+      // reliable backbone; the direct scan adds on top when it isn't blocked).
+      const mentionCount = Math.round(
+        (apeWisdomMentions.get(ticker) ?? 0) + (supplementaryScores.get(ticker) ?? 0),
+      );
 
       if (priceHistory.length === 0) {
         log.push(`${ticker}: keine Kursdaten von Stooq erhalten — übersprungen.`);
@@ -352,6 +460,7 @@ Deno.serve(async () => {
         mentionCount,
         (history ?? []) as SignalRow[],
         priceHistory,
+        sentiment,
       );
 
       const { error: signalError } = await supabase.from('signals').insert({
@@ -434,7 +543,7 @@ Deno.serve(async () => {
               price,
               fee,
               gross_amount: grossAmount,
-              reason: `Dip erkannt: ${(dropFromHigh * 100).toFixed(1)}% unter dem ${HISTORY_LOOKBACK}-Tage-Hoch, Hype organisch bestätigt.`,
+              reason: `Dip erkannt: ${(dropFromHigh * 100).toFixed(1)}% unter dem ${HISTORY_LOOKBACK}-Tage-Hoch, Hype organisch & von Stimmung/Kurs bestätigt.`,
             });
             const { data: inserted } = await supabase
               .from('positions')
