@@ -134,7 +134,7 @@ create policy "Public read access" on public.balance_history for select using (t
 -- tables: only the service-role key (used by the Edge Function) can write,
 -- since it bypasses RLS entirely.
 
--- ── Cron: trigger the market-scan Edge Function every 6 hours ────────────
+-- ── Cron: trigger the market-scan Edge Function during trading hours ─────
 -- One-time manual setup (cannot be scripted — needs your project's URL/keys):
 --
 -- 1. In the SQL editor, enable the required extensions:
@@ -153,8 +153,8 @@ create policy "Public read access" on public.balance_history for select using (t
 --    placeholders below with your actual project ref and run once:
 --
 --      select cron.schedule(
---        'market-scan-every-6h',
---        '0 */6 * * *',
+--        'market-scan-during-trading-hours',
+--        '0 15,17,19 * * 1-5',
 --        $$
 --        select net.http_post(
 --          url     := 'https://YOUR-PROJECT-REF.supabase.co/functions/v1/market-scan',
@@ -167,9 +167,43 @@ create policy "Public read access" on public.balance_history for select using (t
 --        $$
 --      );
 --
+-- WHY '0 15,17,19 * * 1-5' (15:00 / 17:00 / 19:00 UTC, Mon-Fri) and not the
+-- earlier round-the-clock '0 */6 * * *':
+--
+--   NYSE/NASDAQ regular hours are 09:30-16:00 America/New_York, which — across
+--   the EDT/EST daylight-saving switch — lands somewhere in 13:30-21:00 UTC.
+--   The OLD schedule (00:00/06:00/12:00/18:00 UTC, every day) put only ONE of
+--   its four daily runs inside that window; the other three (and EVERY weekend
+--   run) could only log signals — `isUsMarketOpen` would refuse to let them
+--   buy or sell, exactly like a real Swissquote account couldn't fill a
+--   US-equity order outside the exchange's session either (see that function's
+--   comment for the full reasoning).
+--
+--   13:30-21:00 (EDT) ∩ 14:30-21:00 (EST) = 14:30-21:00 UTC is the overlap
+--   that's open REGARDLESS of which side of the DST switch you're on — no
+--   need to hand-roll the twice-yearly offset change (the "honestly disclosed
+--   simplification" `isUsMarketOpen` already favours over a brittle one).
+--   15:00/17:00/19:00 UTC sits squarely inside that overlap year-round, and
+--   skipping weekends outright (`1-5`) drops runs that could never do
+--   anything but log "markets closed" anyway.
+--
+--   Net effect: every single scan can now actually act on what it finds —
+--   and a missed buy candidate reappears on the very next run at most ~2h
+--   later (always same trading day), instead of potentially many hours, or an
+--   entire closed weekend, away. See the buy-check's comment in
+--   market-scan/index.ts for why that "it just reappears soon" approach beats
+--   queuing orders to fill at the next open: a multi-day-stale signal filled
+--   at a much-later price would be exactly the kind of noise this schedule
+--   change avoids by making "soon" actually mean soon.
+--
+--   (`HISTORY_LOOKBACK` in market-scan/index.ts was lowered from 28 to 15 to
+--   match — at 3 scans × 5 trading days/week, 15 rows is the new "~1 week of
+--   samples", preserving the original baseline-horizon intent rather than
+--   silently drifting to ~1.9 weeks as a side effect of this change.)
+--
 -- To inspect or remove the schedule later:
 --      select * from cron.job;
---      select cron.unschedule('market-scan-every-6h');
+--      select cron.unschedule('market-scan-during-trading-hours');
 
 -- ── Cron #2: keep the portfolio value current between full scans ─────────
 -- `market-scan` only runs every 6h and does the expensive discovery work.

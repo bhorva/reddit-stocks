@@ -160,21 +160,27 @@ const FX_FEE_RATE = 0.0095;
 const FALLBACK_USD_CHF_RATE = 0.80;
 
 // How many past `signals` rows feed the z-score baseline in `classify()`.
-// At the 6-hourly scan cadence, 8 rows ≈ 2 days — barely more than a single
-// weekend blip, and far too short to capture the weekday/weekend rhythm
-// Reddit chatter typically follows (e.g. noticeably quieter on weekends).
-// That made the baseline (and therefore the z-score and hype score) jumpy and
-// unstable — exactly the kind of noise a "rolling mean/stddev" baseline is
-// supposed to smooth out. 28 rows ≈ one full week (4 scans/day × 7 days):
-// long enough to span a complete weekday/weekend cycle and give the z-score
-// enough samples to be statistically meaningful, short enough that a newly
-// discovered ticker can build up a representative baseline within about a
-// week of joining the watchlist. Also brings this in line with the rest of
-// the engine, which is now uniformly "multi-week-minded" for swing trading
-// (the ~30-day price history, the ~3-4-week volume baseline, the multi-week
-// "recent high" for dip detection) — the old 2-day window was the one piece
-// still tuned for a fast pump-&-dip reaction loop.
-const HISTORY_LOOKBACK = 28; // how many past signal rows to use for the hype baseline
+//
+// Originally tuned to "28 rows ≈ one full week" at a 4-scans/day, round-the-
+// clock cadence (4 × 7 = 28) — long enough to span a complete weekday/weekend
+// cycle, short enough that a newly discovered ticker builds a representative
+// baseline within about a week. Brings this in line with the rest of the
+// engine's "multi-week-minded" swing-trading tuning (the ~30-day price
+// history, the ~3-4-week volume baseline, the multi-week "recent high").
+//
+// The cadence changed (see `market-scan-during-trading-hours` — now 3 scans
+// on each TRADING day only, no weekend runs at all: scanning while NYSE/
+// NASDAQ is closed could never produce an actionable signal anyway, see
+// `isUsMarketOpen`). At 3 × 5 = 15 rows/week, the OLD value of 28 would now
+// span ≈ 1.9 weeks rather than 1 — not wrong, just a different baseline
+// horizon than the one the original reasoning settled on. Lowered to 15 to
+// preserve that original "~1 week, ~1 trading week of samples" intent rather
+// than silently drifting to a longer one as a side effect of an unrelated
+// scheduling change. (The "spans a weekday/weekend cycle" reasoning no longer
+// applies either way — there IS no weekend data to span anymore; every row in
+// the baseline is now a trading-day sample, which if anything makes the
+// baseline MORE representative of "normal" Reddit chatter, not less.)
+const HISTORY_LOOKBACK = 15; // how many past signal rows to use for the hype baseline
 
 // ── Dynamic ticker discovery ─────────────────────────────────────────────
 // Both nudged up (25→32 / 10→14): the 5-lens "organic" classification
