@@ -171,6 +171,16 @@ export interface SignalSnapshot {
   baseline_mentions: number;
   sentiment_ratio: number | null;
   price_trend_pct: number;
+  /** Ticker's price-trend % minus the SPY benchmark's over the same window —
+   *  positive means genuine stock-specific outperformance, not just riding a
+   *  rising tide. New in the swing-trading classification (5-lens "organic"
+   *  check); absent on signals captured before that change. */
+  relative_strength_pct?: number;
+  /** Ratio of the last ~5 trading days' average volume to the prior ~3-4
+   *  weeks' average — "is the crowd actually trading this, or just talking
+   *  about it?" `null` when Yahoo had too little history to compare. New in
+   *  the swing-trading classification; absent on older signals. */
+  volume_ratio?: number | null;
   drop_from_high_pct: number;
   verdict: string;
   intraday_points: number;

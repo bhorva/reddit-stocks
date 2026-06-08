@@ -369,25 +369,65 @@ async function fetchIntradayPrices(ticker: string): Promise<number[]> {
   }
 }
 
-// ── Benchmark: SPY price, so the dashboard can show "vs. simply holding an
-// index fund" — the only honest way to tell whether this strategy is adding
-// value over a naive baseline rather than just riding a rising market.
-async function fetchBenchmarkPrice(): Promise<number | null> {
+interface VolumeProfile {
+  recentAvg: number;
+  baselineAvg: number;
+}
+
+// ── Source 4 (confirmation): trading volume ──────────────────────────────
+// Mentions and price can both look "right" on paper while almost nobody is
+// actually trading the name — loud Reddit chatter about a stock that trades
+// on a trickle of volume is the classic "all talk, no real participation"
+// setup: easy to manufacture, and easy to get burned chasing. Comparing the
+// last ~5 trading days' average volume to the prior ~3-4 weeks' average turns
+// "is the crowd actually showing up for this, or just talking about it?" into
+// a number `classify()` can use exactly like StockTwits sentiment.
+//
+// This re-fetches the same Yahoo Finance chart endpoint `fetchPriceHistory`
+// already hits, rather than threading a `volume[]` array through that
+// function's `number[]` return type and all of its callers. That's a
+// deliberate, small duplication: it keeps this signal entirely optional and
+// isolated — if it fails, classification just falls back to "no volume data"
+// (the same fail-soft pattern as sentiment), with zero risk of destabilizing
+// the price-history path that the dip-detection and trend logic depend on.
+async function fetchVolumeProfile(ticker: string): Promise<VolumeProfile | null> {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+    ticker,
+  )}?range=1mo&interval=1d`;
   try {
-    const history = await fetchPriceHistory('SPY');
-    return history.length ? history[history.length - 1] : null;
-  } catch {
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const result = data?.chart?.result?.[0];
+    if (data?.chart?.error || !result) return null;
+    const volumes: unknown[] = result?.indicators?.quote?.[0]?.volume ?? [];
+    const valid = volumes.filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0);
+    if (valid.length < 10) return null; // too little history to split into "recent" vs. "baseline" meaningfully
+    const recent = valid.slice(-5); // last ~5 trading days — "right now"
+    const baseline = valid.slice(0, -5); // everything before that — "normal"
+    const avg = (xs: number[]) => xs.reduce((sum, x) => sum + x, 0) / xs.length;
+    return { recentAvg: avg(recent), baselineAvg: avg(baseline) };
+  } catch (err) {
+    console.warn(`Volumen-Profil fehlgeschlagen für ${ticker}: ${err}`);
     return null;
   }
 }
 
 // ── Hype classification ──────────────────────────────────────────────────
-// Correlates THREE independent signals so a single noisy source can't drive
-// a trade: how much MORE a ticker is being mentioned than usual (Reddit/
-// ApeWisdom + supplementary direct scan), whether the wider crowd actually
-// agrees with a bullish read (StockTwits sentiment), and whether the price
-// itself confirms the story (Yahoo Finance). Only when mentions, sentiment AND price
-// roughly agree do we call it "organic" and let the trading logic act on it.
+// Correlates FIVE independent lenses so no single noisy source can drive a
+// trade on its own: how much MORE a ticker is being mentioned than usual
+// (Reddit/ApeWisdom), whether the wider crowd actually agrees with a bullish
+// read (StockTwits sentiment), whether the price itself confirms the story
+// (Yahoo Finance), whether real trading VOLUME backs the move (this ticker's
+// own history), and — the newest lens — whether the stock is genuinely
+// outperforming the broad MARKET rather than just floating up with a rising
+// tide (vs. SPY). "Organic" now requires all five to line up; anything less
+// is "spike" (watched, not traded). That's a deliberately higher bar than the
+// original two-factor check (mentions + price): each lens is an independent
+// way a "this looks like a real move" story can fall apart, and demanding
+// agreement across all of them is the actual edge — fewer trades, but each
+// one resting on firmer ground (which, as a side effect, also helps the
+// per-trade fee math: see the TAKE_PROFIT/STOP_LOSS comment).
 type Verdict = 'organic' | 'spike' | 'pure-hype';
 
 interface ClassificationResult {
@@ -402,6 +442,8 @@ interface ClassificationResult {
   zScore: number;
   priceTrendPct: number;
   sentimentRatio: number | null;
+  relativeStrengthPct: number;
+  volumeRatio: number | null;
 }
 
 // Hype score is now a proper rolling z-score of the mention count against its
@@ -415,6 +457,8 @@ function classify(
   history: SignalRow[],
   priceHistory: number[],
   sentiment: SentimentSummary | null,
+  benchmarkTrendPct: number,
+  volume: VolumeProfile | null,
 ): ClassificationResult {
   const counts = history.map((s) => s.mention_count);
   const n = counts.length;
@@ -432,7 +476,34 @@ function classify(
     priceHistory.length >= 2 ? priceHistory[priceHistory.length - 1] - priceHistory[0] : 0;
   const priceTrendPct = priceHistory.length >= 2 && priceHistory[0] !== 0 ? (priceTrend / priceHistory[0]) * 100 : 0;
   const priceFallingOrFlat = priceTrend <= 0;
-  const isSpike = baseline > 0 && mentionCount > baseline * 3;
+
+  // ── Relative strength vs. the broad market (SPY) ───────────────────────
+  // A stock rising 5% while the whole market rises 5% has no stock-specific
+  // story at all — that's beta, not the kind of "this particular ticker has
+  // its own catalyst" alpha a hype-driven strategy should be hunting for.
+  // Only when a ticker meaningfully OUTPACES the benchmark over the same
+  // window does a mention spike plausibly point at something the market
+  // hasn't already priced in everywhere. `benchmarkTrendPct` is computed once
+  // per run (see Deno.serve below) and shared across every ticker — the
+  // market's own trend doesn't change per-ticker, so there's no reason to
+  // (re-)derive it per-ticker, and every ticker ends up compared against
+  // exactly the same window.
+  const relativeStrengthPct = priceTrendPct - benchmarkTrendPct;
+  const marketConfirms = relativeStrengthPct > 0;
+
+  // ── Trading-volume confirmation ─────────────────────────────────────────
+  // `volume` is null when Yahoo had too little history to compare against —
+  // treated as "neutral / no opinion" (same fail-soft convention as
+  // sentiment below), not as a red flag, so thin data coverage alone can't
+  // permanently keep a ticker from ever being traded.
+  let volumeNote = 'keine Volumendaten verfügbar';
+  let volumeContradicts = false;
+  let volumeRatio: number | null = null;
+  if (volume && volume.baselineAvg > 0) {
+    volumeRatio = volume.recentAvg / volume.baselineAvg;
+    volumeContradicts = volumeRatio <= 0.7; // notably thinner than usual — move lacks real participation
+    volumeNote = `Volumen ${(volumeRatio * 100).toFixed(0)}% des 4-Wochen-Schnitts (${volumeContradicts ? 'dünn — wenig echte Beteiligung' : 'unauffällig'})`;
+  }
 
   // Crowd-sentiment confirmation: is the wider trading crowd actually bullish,
   // or does the mention spike look one-sided / unconfirmed by sentiment?
@@ -447,7 +518,15 @@ function classify(
     sentimentNote = `StockTwits-Stimmung ${(sentimentRatio * 100).toFixed(0)}% bullish (${sentiment.bullish}↑/${sentiment.bearish}↓)`;
   }
 
-  const common = { hypeScore, baselineMentions: baseline, zScore, priceTrendPct, sentimentRatio };
+  const common = {
+    hypeScore,
+    baselineMentions: baseline,
+    zScore,
+    priceTrendPct,
+    sentimentRatio,
+    relativeStrengthPct: Math.round(relativeStrengthPct * 100) / 100,
+    volumeRatio: volumeRatio === null ? null : Math.round(volumeRatio * 1000) / 1000,
+  };
 
   // Pure hype: loud on Reddit, but neither the crowd's sentiment nor the price
   // backs it up — the textbook "pump" setup we must not chase.
@@ -458,27 +537,50 @@ function classify(
       blocked: true,
       reason:
         `Hype-Score ${hypeScore.toFixed(0)} (z=${zScore.toFixed(1)}) > ${HYPE_BLOCK_THR} bei ${mentionCount} Erwähnungen ` +
-        `(Ø ${baseline.toFixed(1)}), Kurs fällt/stagniert (${priceTrendPct.toFixed(1)}% über ${priceHistory.length} Tage), ${sentimentNote} ` +
-        `— keine fundamentale Bestätigung. Geblockt.`,
+        `(Ø ${baseline.toFixed(1)}), Kurs fällt/stagniert (${priceTrendPct.toFixed(1)}% über ${priceHistory.length} Tage), ` +
+        `${sentimentNote}, ${volumeNote} — keine fundamentale Bestätigung. Geblockt.`,
     };
   }
-  // Spike: loud, but either the crowd contradicts the hype or the price hasn't
-  // moved — wait and watch instead of trading it.
-  if (isSpike && (priceFallingOrFlat || sentimentContradicts)) {
+
+  // Organic = ALL FIVE independent lenses agree this is a real, tradeable
+  // move: mentions are elevated, price direction matches the story, the stock
+  // genuinely OUTPACES the broad market (not just riding a rising tide — see
+  // `marketConfirms` above), the crowd's sentiment doesn't contradict it, and
+  // real trading volume backs it up. This is the actual "edge" change versus
+  // the original two-factor (mentions + price) check: a system where five
+  // largely-independent signals must agree should, in principle, have a
+  // meaningfully better hit rate than one relying on two — at the cost of
+  // triggering less often, which is the right trade for a swing-trading shape
+  // anyway (see TAKE_PROFIT/STOP_LOSS).
+  if (!priceFallingOrFlat && marketConfirms && !sentimentContradicts && !volumeContradicts) {
     return {
       ...common,
-      verdict: 'spike',
+      verdict: 'organic',
       blocked: false,
       reason:
-        `Mention-Spike (${mentionCount} vs. Ø ${baseline.toFixed(1)}, z=${zScore.toFixed(1)}), ${sentimentNote}, ` +
-        `ohne übereinstimmende Kursbewegung (${priceTrendPct.toFixed(1)}%) — verdächtig, wird beobachtet, aber nicht gehandelt.`,
+        `${mentionCount} Erwähnungen (Ø ${baseline.toFixed(1)}, z=${zScore.toFixed(1)}), ${sentimentNote}, ${volumeNote}, ` +
+        `Kurs ${priceTrendPct >= 0 ? '+' : ''}${priceTrendPct.toFixed(1)}% bei relativer Stärke ${relativeStrengthPct >= 0 ? '+' : ''}${relativeStrengthPct.toFixed(1)}pp ggü. SPY ` +
+        `(SPY ${benchmarkTrendPct >= 0 ? '+' : ''}${benchmarkTrendPct.toFixed(1)}%) — alle fünf unabhängigen Bestätigungssignale stimmen überein.`,
     };
   }
+
+  // Everything else: loud and/or moving, but at least one independent lens
+  // disagrees — watch, don't trade. (Replaces the old narrower "loud AND
+  // contradicted" check: the real question driving the higher hit-rate isn't
+  // "is the raw mention count >3x baseline", it's "do we have full,
+  // independent confirmation to actually trust this" — answered above.)
+  const gaps: string[] = [];
+  if (priceFallingOrFlat) gaps.push(`Kurs bestätigt nicht (${priceTrendPct.toFixed(1)}%)`);
+  if (!marketConfirms) gaps.push(`keine relative Stärke ggü. SPY (${relativeStrengthPct >= 0 ? '+' : ''}${relativeStrengthPct.toFixed(1)}pp, SPY ${benchmarkTrendPct >= 0 ? '+' : ''}${benchmarkTrendPct.toFixed(1)}%)`);
+  if (sentimentContradicts) gaps.push(sentimentNote);
+  if (volumeContradicts) gaps.push(volumeNote);
   return {
     ...common,
-    verdict: 'organic',
+    verdict: 'spike',
     blocked: false,
-    reason: `${mentionCount} Erwähnungen (Ø ${baseline.toFixed(1)}, z=${zScore.toFixed(1)}), ${sentimentNote}, Kursverlauf ${priceTrendPct >= 0 ? '+' : ''}${priceTrendPct.toFixed(1)}% bestätigt die Richtung.`,
+    reason:
+      `${mentionCount} Erwähnungen (Ø ${baseline.toFixed(1)}, z=${zScore.toFixed(1)}) — ${gaps.join('; ')} ` +
+      `— kein stimmiges Gesamtbild aus allen fünf Signalen, wird beobachtet statt gehandelt.`,
   };
 }
 
@@ -587,6 +689,32 @@ Deno.serve(async () => {
       }
     }
 
+    // ── Benchmark: SPY daily history, fetched ONCE per run ──────────────
+    // Feeds two things: (a) the `relativeStrengthPct` input to `classify()`
+    // below — "did this ticker actually outpace the broad market, or just
+    // float up with it?" (see the comment at `marketConfirms` for why that
+    // matters); and (b) the `balance_history.spy_price` snapshot at the end,
+    // so the dashboard can show "vs. simply holding an index fund" — the only
+    // honest way to tell whether this strategy adds value over a naive
+    // baseline. Fetched once and shared across every ticker: the market's own
+    // trend doesn't change per-ticker, so deriving it once is both cheaper
+    // and guarantees every ticker is compared against the exact same window.
+    let benchmarkHistory: number[] = [];
+    try {
+      benchmarkHistory = await fetchPriceHistory('SPY');
+    } catch (err) {
+      console.warn(`SPY-Historie konnte nicht geladen werden: ${err}`);
+    }
+    const benchmarkTrendPct =
+      benchmarkHistory.length >= 2 && benchmarkHistory[0] !== 0
+        ? ((benchmarkHistory[benchmarkHistory.length - 1] - benchmarkHistory[0]) / benchmarkHistory[0]) * 100
+        : 0;
+    if (benchmarkHistory.length === 0) {
+      log.push(
+        'SPY-Vergleichsdaten nicht verfügbar — relative Stärke wird für diesen Lauf konservativ als "kein Marktvergleich möglich" (0%) behandelt.',
+      );
+    }
+
     // ── Phase 3: evaluate every hot ticker plus anything we still hold ──
     const evaluationSet = new Map<string, number[]>(hotPriceHistory);
     for (const ticker of positionTickers) {
@@ -600,9 +728,10 @@ Deno.serve(async () => {
     }
 
     for (const [ticker, dailyHistory] of evaluationSet) {
-      const [sentiment, intradayHistory, { data: history }] = await Promise.all([
+      const [sentiment, intradayHistory, volumeProfile, { data: history }] = await Promise.all([
         fetchStockTwitsSentiment(ticker),
         fetchIntradayPrices(ticker),
+        fetchVolumeProfile(ticker),
         supabase
           .from('signals')
           .select('ticker, scanned_at, price, mention_count, hype_score')
@@ -629,12 +758,18 @@ Deno.serve(async () => {
       const price = recentPrices[recentPrices.length - 1];
       latestPrices.set(ticker, price);
 
-      const { hypeScore, verdict, blocked, reason, baselineMentions, zScore, priceTrendPct, sentimentRatio } = classify(
-        mentionCount,
-        (history ?? []) as SignalRow[],
-        dailyHistory,
-        sentiment,
-      );
+      const {
+        hypeScore,
+        verdict,
+        blocked,
+        reason,
+        baselineMentions,
+        zScore,
+        priceTrendPct,
+        sentimentRatio,
+        relativeStrengthPct,
+        volumeRatio,
+      } = classify(mentionCount, (history ?? []) as SignalRow[], dailyHistory, sentiment, benchmarkTrendPct, volumeProfile);
 
       const { error: signalError } = await supabase.from('signals').insert({
         ticker,
@@ -747,6 +882,8 @@ Deno.serve(async () => {
               baseline_mentions: Math.round(baselineMentions * 10) / 10,
               sentiment_ratio: sentimentRatio === null ? null : Math.round(sentimentRatio * 1000) / 1000,
               price_trend_pct: Math.round(priceTrendPct * 100) / 100,
+              relative_strength_pct: Math.round(relativeStrengthPct * 100) / 100,
+              volume_ratio: volumeRatio === null ? null : Math.round(volumeRatio * 1000) / 1000,
               drop_from_high_pct: Math.round(dropFromHigh * 1000) / 10,
               verdict,
               intraday_points: intradayHistory.length,
@@ -795,7 +932,9 @@ Deno.serve(async () => {
       (sum, p) => sum + p.shares * (latestPrices.get(p.ticker) ?? p.entry_price),
       0,
     );
-    const spyPrice = await fetchBenchmarkPrice();
+    // Reuses `benchmarkHistory` (fetched once, up top, for `relativeStrengthPct`)
+    // rather than a second round-trip to Yahoo Finance for the same symbol.
+    const spyPrice = benchmarkHistory.length ? benchmarkHistory[benchmarkHistory.length - 1] : null;
     if (spyPrice === null) {
       log.push('SPY-Benchmarkpreis konnte nicht geladen werden — Vergleichschart bleibt für diesen Lauf ohne neuen Punkt.');
     }
