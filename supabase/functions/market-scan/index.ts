@@ -1153,6 +1153,14 @@ Deno.serve(async () => {
         drop_from_high_pct: Math.round(dropFromHigh * 1000) / 10,
         would_have_bought: wouldHaveBought,
         skipped_for_capacity: skippedForCapacity,
+        // Persist the StockTwits crowd-sentiment ratio on EVERY signal row
+        // (not just buys' `signal_snapshot`, as before v9) — see
+        // trading_schema_v9_sentiment_column.sql for why the watchlist needed
+        // this to show "what does the crowd think about this ticker right
+        // now", independent of whether a trade happened. `null` is preserved
+        // as-is (honest "fewer than 5 tagged messages" — see `classify`),
+        // never coerced to 0, which would misrepresent thin data as neutral.
+        sentiment_ratio: sentimentRatio === null ? null : Math.round(sentimentRatio * 1000) / 1000,
       });
       if (signalError) throw signalError;
       log.push(`${ticker}: ${verdict} (hype=${hypeScore.toFixed(0)}, mentions=${mentionCount}, price=${price})`);

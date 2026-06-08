@@ -334,6 +334,10 @@ interface MissedOpportunityView {
                   Hype <span class="sort-indicator">{{ signalSortIndicator('hype_score') }}</span>
                   <span class="info-icon" tabindex="0" title="Misst, wie ungewöhnlich oft eine Aktie GERADE JETZT in Reddit/StockTwits erwähnt wird, verglichen mit ihrem üblichen Niveau (statistischer Z-Score, auf 0–100 skaliert). Hoch = aktuell viel Gerede — sagt für sich allein noch nichts darüber aus, ob das Gerede berechtigt ist (das entscheidet erst das 'Verdict'). Standard-Sortierung dieser Tabelle: absteigend nach Hype, weil das den 'lautesten' Tickern zuerst Aufmerksamkeit gibt.">ⓘ</span>
                 </th>
+                <th>
+                  Stimmung
+                  <span class="info-icon" tabindex="0" title="Wie die breite Trading-Crowd auf StockTwits diesen Ticker GERADE JETZT einschätzt — Anteil bullish vs. bearish getaggter Nachrichten (mind. 5 nötig, sonst '–'). Dient als Korrelations-Check zum Reddit-Hype: bestätigt die breitere Masse einen Anstieg, oder wirkt er einseitig fabriziert? Der Balken ist bei 50% zentriert: wächst er nach RECHTS (grün), überwiegt Bullish-Stimmung — nach LINKS (rot), überwiegt Bearish-Stimmung. Fliesst direkt in das 'Verdict' ein (siehe dort): u. a. kann ein lauter, aber mehrheitlich bearish kommentierter Anstieg als 'Pure-Hype' geblockt werden, selbst wenn der Kurs kurzzeitig mitzieht.">ⓘ</span>
+                </th>
                 <th class="sortable" [class.sorted]="signalSortColumn() === 'verdict'" (click)="toggleSignalSort('verdict')">
                   Verdict <span class="sort-indicator">{{ signalSortIndicator('verdict') }}</span>
                   <span class="info-icon" tabindex="0" title="Versucht zu unterscheiden, ob ein Erwähnungs-Anstieg von echter Kursbewegung & Stimmung begleitet wird ('Organisch' = handelbar) oder nur heisse Luft ist ('Spike' = verdächtig, wird beobachtet aber nicht gehandelt; 'Geblockt' = als reiner Hype eingestuft, kein Trade). Sortierung ordnet nach Handelbarkeit: Organisch → Spike → Geblockt.">ⓘ</span>
@@ -358,6 +362,26 @@ interface MissedOpportunityView {
                       </div>
                       <span>{{ s.hype_score | number: '1.0-0' }}</span>
                     </div>
+                  </td>
+                  <td [title]="sentimentTooltip(s)">
+                    @if (s.sentiment_ratio === null) {
+                      <span class="sent-na">– (zu wenig Daten)</span>
+                    } @else {
+                      <div class="sent-wrap">
+                        <div class="sent-track">
+                          <span class="sent-center-tick"></span>
+                          <span
+                            class="sent-fill"
+                            [class.bull]="s.sentiment_ratio >= 0.5"
+                            [class.bear]="s.sentiment_ratio < 0.5"
+                            [style.width.%]="sentimentFillPct(s.sentiment_ratio)"
+                          ></span>
+                        </div>
+                        <span class="sent-label" [class.bull-text]="s.sentiment_ratio >= 0.5" [class.bear-text]="s.sentiment_ratio < 0.5">
+                          <span class="icon">{{ s.sentiment_ratio >= 0.5 ? '▲' : '▼' }}</span>{{ s.sentiment_ratio | percent: '1.0-0' }}
+                        </span>
+                      </div>
+                    }
                   </td>
                   <td><span class="badge" [class]="verdictClass(s)">{{ verdictLabel(s) }}</span></td>
                 </tr>
@@ -971,6 +995,25 @@ interface MissedOpportunityView {
       .hype-bar-wrap { display: flex; align-items: center; gap: 6px; }
       .hype-bar-bg { flex: 1; background: #eee; border-radius: 4px; height: 6px; min-width: 50px; }
       .hype-bar-fill { height: 6px; border-radius: 4px; }
+      /* ── "Stimmung" column: diverging bar centred on 50% ──────────────────
+         Deliberately mirrors the hype-bar's visual vocabulary (thin track +
+         coloured fill + number) rather than inventing a new one, but grows
+         from the CENTER outward instead of from the left edge — that's what
+         lets it show DIRECTION (bullish-leaning right/green vs. bearish-
+         leaning left/red) and STRENGTH (how far it strays from 50/50) in a
+         single glance, which a left-anchored bar couldn't represent (a 51%
+         and a 95% reading would look almost identical). */
+      .sent-wrap { display: flex; align-items: center; gap: 7px; min-width: 110px; }
+      .sent-track { position: relative; flex: 1; background: #eee; border-radius: 4px; height: 6px; min-width: 50px; }
+      .sent-center-tick { position: absolute; left: 50%; top: -2px; width: 1px; height: 10px; background: #ccc; }
+      .sent-fill { position: absolute; top: 0; height: 6px; border-radius: 4px; }
+      .sent-fill.bull { left: 50%; background: #2bab5e; }
+      .sent-fill.bear { right: 50%; background: #d6594a; }
+      .sent-label { display: inline-flex; align-items: center; gap: 3px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+      .sent-label .icon { font-size: 0.78rem; line-height: 1; }
+      .sent-label.bull-text { color: #1a8a3c; }
+      .sent-label.bear-text { color: #c0392b; }
+      .sent-na { color: #999; font-size: 0.75rem; }
       .pos-row { padding: 10px 0; border-bottom: 1px solid #eee; }
       .pos-row:last-child { border-bottom: none; }
       .pos-row-rich { display: flex; flex-direction: column; gap: 3px; }
@@ -1784,6 +1827,44 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     if (score > 65) return '#c0392b';
     if (score > 40) return '#c98a00';
     return '#1a8a3c';
+  }
+
+  /**
+   * How far the diverging "Stimmung" bar's fill should grow AWAY FROM the
+   * center (in % of the half-track it occupies) for a given bullish ratio.
+   * `(ratio - 0.5)` is the raw deviation from neutral (range -0.5..+0.5);
+   * doubling it stretches that into the full 0-100% range so a 95%-bullish
+   * reading fills its half almost completely instead of being visually
+   * cramped into a sliver near the center — see the `.sent-*` styles' doc
+   * comment for why a center-anchored bar was chosen over a left-anchored
+   * one in the first place (direction AND strength in one glance).
+   */
+  protected sentimentFillPct(ratio: number): number {
+    return Math.abs(ratio - 0.5) * 100;
+  }
+
+  /**
+   * Cell tooltip for the "Stimmung" column — mirrors the thresholds
+   * `classify()` actually uses server-side (`sentimentConfirmsBullish` at
+   * >= 0.55, `sentimentContradicts` at <= 0.4, see market-scan/index.ts) so
+   * the explanation here can never drift out of sync with what the engine
+   * actually does with this number. Deliberately phrased in terms of "Hype",
+   * not "Kauf" — sentiment is one of five lenses that feed the Verdict, not
+   * a standalone buy/sell signal (see the column's header info-icon).
+   */
+  protected sentimentTooltip(s: SignalRow): string {
+    const ratio = s.sentiment_ratio;
+    if (ratio === null) {
+      return 'Weniger als 5 getaggte StockTwits-Nachrichten — keine verlässliche Stimmungsmessung möglich (siehe Spalten-Info).';
+    }
+    const pct = Math.round(ratio * 100);
+    if (ratio >= 0.55) {
+      return `StockTwits-Stimmung: ${pct}% bullish — bestätigt potenziellen Hype (Schwelle ≥ 55%).`;
+    }
+    if (ratio <= 0.4) {
+      return `StockTwits-Stimmung: ${pct}% bullish — widerspricht potenziellem Hype (Schwelle ≤ 40%), kann allein zur Blockierung führen.`;
+    }
+    return `StockTwits-Stimmung: ${pct}% bullish — neutral (weder klare Bestätigung noch klarer Widerspruch).`;
   }
 
   protected verdictLabel(s: SignalRow): string {

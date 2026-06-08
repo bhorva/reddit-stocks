@@ -343,6 +343,18 @@ export interface SignalRow {
    */
   drop_from_high_pct: number | null;
   /**
+   * StockTwits bullish/(bullish+bearish) ratio at scan time (0..1) — the same
+   * crowd-sentiment "Korrelations-Check" number `classify()` already folds
+   * into the Verdict (one of five independent confirmation lenses; see
+   * `market-scan/index.ts`). `null` means "fewer than 5 tagged messages were
+   * available", the honest "not enough data for a meaningful read" state —
+   * NOT "neutral 0%" or "no opinion either way", which would misrepresent
+   * thin data as a measured result. Persisted on every signal row since the
+   * v9 migration (`trading_schema_v9_sentiment_column.sql`); `null` also for
+   * legacy rows that predate it, same convention as `drop_from_high_pct`.
+   */
+  sentiment_ratio: number | null;
+  /**
    * True iff every condition for opening a new position here was met EXCEPT
    * the `MAX_POSITIONS` capacity check — i.e. market open, no existing
    * position in this ticker, verdict organic, dip threshold cleared. Mirrors
