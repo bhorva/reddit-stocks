@@ -2,6 +2,13 @@
 -- trading_schema_v4_fx_rate.sql has been applied. Purely additive
 -- (CREATE OR REPLACE VIEW + GRANT) and safe to re-run.
 --
+-- NOTE on column order: Postgres' CREATE OR REPLACE VIEW only allows APPENDING
+-- columns — inserting a new one between existing columns makes it think you're
+-- renaming an existing column and fails with "42P16 cannot change name of view
+-- column ... HINT: Use ALTER VIEW ... RENAME COLUMN ...". That's why every new
+-- FX-adjusted column below is appended at the end of its SELECT list, after
+-- all the original v3 columns (which keep their exact name + position).
+--
 -- WHY: v4 introduced a real USD/CHF exchange-rate model, so a closed trade's
 -- `realized_pnl` (in CHF) is now a BLEND of two economically unrelated things:
 --
@@ -62,7 +69,16 @@ select
   )                                                         as win_rate_pct,
   round(avg(sell.realized_pnl), 2)                          as avg_realized_pnl,
   round(sum(sell.realized_pnl), 2)                          as total_realized_pnl,
+  round(
+    avg(extract(epoch from (sell.created_at - buy.created_at)) / 3600.0),
+    1
+  )                                                         as avg_holding_hours,
+  count(*) filter (where sell.exit_reason ilike 'take-profit%') as exits_take_profit,
+  count(*) filter (where sell.exit_reason ilike 'stop-loss%')   as exits_stop_loss,
   -- ── FX-bereinigte Sicht: war die Aktien-Auswahl gut, unabhängig vom Kurs? ──
+  -- (ans Ende angehängt, NICHT zwischen bestehende Spalten eingefügt — Postgres
+  -- behandelt CREATE OR REPLACE VIEW sonst als "Spalte umbenennen" und lehnt es
+  -- mit 42P16 ab; neue Spalten dürfen nur am Ende angehängt werden.)
   round(
     100.0 * count(*) filter (
       where sell.shares
@@ -90,13 +106,7 @@ select
         * (coalesce(sell.usd_chf_rate, 1.0) - coalesce(buy.usd_chf_rate, 1.0))
     ),
     2
-  )                                                         as avg_fx_pnl,
-  round(
-    avg(extract(epoch from (sell.created_at - buy.created_at)) / 3600.0),
-    1
-  )                                                         as avg_holding_hours,
-  count(*) filter (where sell.exit_reason ilike 'take-profit%') as exits_take_profit,
-  count(*) filter (where sell.exit_reason ilike 'stop-loss%')   as exits_stop_loss
+  )                                                         as avg_fx_pnl
 from public.transactions sell
 join public.transactions buy on buy.id = sell.opening_transaction_id
 where sell.action = 'sell'
@@ -134,7 +144,11 @@ select
     1
   )                                                         as win_rate_pct,
   round(avg(sell.realized_pnl), 2)                          as avg_realized_pnl,
-  -- ── FX-bereinigte Sicht (siehe trade_outcomes_by_verdict oben) ──────────────
+  round(avg((buy.signal_snapshot ->> 'z_score')::numeric), 2) as avg_z_score_in_bucket,
+  round(avg((buy.signal_snapshot ->> 'price_trend_pct')::numeric), 2) as avg_price_trend_pct,
+  -- ── FX-bereinigte Sicht (ans Ende angehängt — siehe Begründung/Hinweis bei
+  -- trade_outcomes_by_verdict oben: CREATE OR REPLACE VIEW erlaubt nur
+  -- Anhängen, kein Einfügen zwischen bestehenden Spalten, sonst 42P16) ────────
   round(
     100.0 * count(*) filter (
       where sell.shares
@@ -155,9 +169,7 @@ select
          + coalesce(buy.fee, 0) + coalesce(buy.fx_fee, 0))
     ),
     2
-  )                                                         as avg_trading_pnl,
-  round(avg((buy.signal_snapshot ->> 'z_score')::numeric), 2) as avg_z_score_in_bucket,
-  round(avg((buy.signal_snapshot ->> 'price_trend_pct')::numeric), 2) as avg_price_trend_pct
+  )                                                         as avg_trading_pnl
 from public.transactions sell
 join public.transactions buy on buy.id = sell.opening_transaction_id
 where sell.action = 'sell'
