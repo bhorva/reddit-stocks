@@ -118,9 +118,47 @@ Einmaliges Setup:
    Service-Role-Key im Vault hinterlegen, je einen Job für `market-scan`
    [alle 6h, Discovery & Trading] und `price-refresh` [alle 30 Minuten,
    Neubewertung offener Positionen] mit `cron.schedule(...)` anlegen).
+4. **Login einrichten** (`supabase/trading_schema_v8_auth_gate.sql`, einmalig):
+   ```bash
+   supabase functions deploy setup-auth-user
+   ```
+   dann einmal aufrufen (z. B. `curl -X POST .../functions/v1/setup-auth-user
+   -H "Authorization: Bearer <ANON_ODER_SERVICE_ROLE_KEY>"`) — legt den
+   einzigen Dashboard-Benutzer **bhorvath** mit Start-Passwort `1234` an
+   (`must_change_password = true`, erzwingt eine Passwortänderung beim ersten
+   Login). Idempotent: ein erneuter Aufruf meldet nur "existiert bereits",
+   ohne ein zwischenzeitlich geändertes Passwort zurückzusetzen. Anschliessend
+   `trading_schema_v8_auth_gate.sql` im SQL-Editor ausführen — das stellt jede
+   "public read"-Policy auf "nur mit gültiger Session lesbar" um.
 
 Das Frontend liest die Ergebnisse nur lesend (`anon`-Key, RLS erlaubt keine
 Schreibzugriffe von dort) — gehandelt wird ausschliesslich serverseitig.
+
+### Login (seit Migration v8)
+
+Das Dashboard ist seit Kurzem durch einen Login geschützt — Single-User-App
+mit genau einem Konto, **bhorvath**. Wichtig dabei: diese App ist eine reine
+Browser-SPA mit einem öffentlich ausgelieferten `anon`-Key
+(`public/config.js`); ein rein UI-seitiger Login wäre also nur ein Vorhang vor
+einer offenen Tür — jeder könnte die Daten weiterhin direkt über die REST-API
+abfragen. Der eigentliche Schutz kommt daher von Migration v8
+([`supabase/trading_schema_v8_auth_gate.sql`](supabase/trading_schema_v8_auth_gate.sql)),
+die jede Tabellen-Policy von "public read" (`using (true)`) auf "nur mit
+gültiger [Supabase-Auth](https://supabase.com/docs/guides/auth)-Session
+lesbar" (`using (auth.role() = 'authenticated')`) umstellt — der Login auf der
+Oberfläche ist also nur die sichtbare Seite eines Mechanismus, der auch
+serverseitig greift.
+
+Da Supabase Auth auf E-Mail/Telefon-Identitäten aufbaut und keinen
+"Benutzername" kennt, bildet die Login-Maske den eingegebenen Benutzernamen im
+Hintergrund auf eine feste, nicht auflösbare Synthetik-Adresse
+(`bhorvath@reddit-stocks.local`) ab — Details dazu im Header-Kommentar von
+`supabase/functions/setup-auth-user/index.ts`. Das initiale Passwort `1234`
+ist mit `user_metadata.must_change_password = true` markiert: nach dem ersten
+erfolgreichen Login zeigt die App zwingend einen "Passwort ändern"-Bildschirm
+(`change-password.component.ts`), bevor das Dashboard zugänglich wird — kein
+"später"-Link, ein bekanntes Default-Passwort, das übersprungen werden kann,
+bleibt erfahrungsgemäss für immer das tatsächlich genutzte.
 
 ### Prozess-Verbesserungen v2 (FX-Kosten, Z-Score, Benchmark, Trade-Verknüpfung)
 

@@ -1,32 +1,33 @@
-import { Injectable } from '@angular/core';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { getRuntimeConfig, isConfigured } from './runtime-config';
+import { Injectable, inject } from '@angular/core';
+import { SupabaseClient } from '@supabase/supabase-js';
+import { SupabaseService } from './supabase.service';
 
 /**
  * Read-only access to the trading-simulation tables. Trading itself runs
  * server-side (the `market-scan` Edge Function, on a 6-hourly cron) using the
- * service-role key — the browser only ever reads via the public anon key, and
- * RLS on these tables grants no insert/update/delete to that role.
+ * service-role key — the browser only ever reads via the public anon key.
+ *
+ * Since the v8 migration, RLS on these tables additionally requires an
+ * AUTHENTICATED session to read at all (see `trading_schema_v8_auth_gate.sql`
+ * / `AuthService`) — logged-out callers now simply get empty results instead
+ * of data, the same "fail soft, render an empty state" shape the dashboard
+ * already handles for "not configured" / "no rows yet".
+ *
+ * Shares the ONE app-wide Supabase client via `SupabaseService` rather than
+ * creating its own — see that service's doc comment for why running two
+ * independent GoTrue (auth) instances against the same project would be a
+ * real problem now that there's an actual session to manage.
  */
 @Injectable({ providedIn: 'root' })
 export class TradingService {
-  private client: SupabaseClient | null = null;
+  private readonly supabase = inject(SupabaseService);
 
   get configured(): boolean {
-    return isConfigured();
+    return this.supabase.configured;
   }
 
   private getClient(): SupabaseClient {
-    if (!this.client) {
-      const cfg = getRuntimeConfig();
-      if (!cfg.SUPABASE_URL || !cfg.SUPABASE_ANON_KEY) {
-        throw new Error(
-          'Supabase ist nicht konfiguriert. Setze SUPABASE_URL und SUPABASE_ANON_KEY.',
-        );
-      }
-      this.client = createClient(cfg.SUPABASE_URL, cfg.SUPABASE_ANON_KEY);
-    }
-    return this.client;
+    return this.supabase.getClient();
   }
 
   async getPortfolio(): Promise<PortfolioRow> {
