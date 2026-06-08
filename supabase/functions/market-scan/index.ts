@@ -58,6 +58,13 @@ const STOP_LOSS = -0.035; // sell once a position loses this much
 const MAX_POSITIONS = 5;
 const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 
+// Currency-conversion spread Swissquote charges when trading USD-denominated
+// stocks from a CHF-denominated account (in addition to the brokerage
+// commission below). Roughly 0.95% each way — previously NOT modelled at all,
+// which made the simulation noticeably too optimistic given the entire
+// watchlist trades in USD. See swissquote.com fee schedule ("Fremdwährungen").
+const FX_FEE_RATE = 0.0095;
+
 const HISTORY_LOOKBACK = 8; // how many past signal rows to use for the hype baseline
 
 // ── Dynamic ticker discovery ─────────────────────────────────────────────
@@ -109,6 +116,7 @@ interface PositionRow {
   ticker: string;
   shares: number;
   entry_price: number;
+  opening_transaction_id: number | null;
 }
 
 interface PortfolioRow {
@@ -134,6 +142,12 @@ function swissquoteFee(amount: number): number {
   if (amount < 25000) return 80;
   if (amount < 50000) return 135;
   return 190;
+}
+
+// Currency-conversion spread on top of the brokerage commission — every trade
+// here is a USD-denominated US stock bought/sold from a CHF account.
+function fxFee(amount: number): number {
+  return amount * FX_FEE_RATE;
 }
 
 // ── Source 1 (primary): ApeWisdom — pre-aggregated Reddit mention ranking ─
@@ -265,6 +279,44 @@ async function fetchPriceHistory(ticker: string): Promise<number[]> {
   return valid.slice(-30); // last ~30 trading days, oldest first
 }
 
+// ── Intraday prices: finer-grained "recent high" for dip detection ───────
+// `fetchPriceHistory` above returns DAILY closes — fine for confirming the
+// multi-day trend (hype classification), but much too coarse for deciding
+// whether "price has dropped >2.5% from its recent high RIGHT NOW": a ticker
+// can swing several percent intraday and fully revert before the next daily
+// close is even recorded, by which point a 6-hourly scan reading only daily
+// data would be reacting to a stale, already-reverted signal. Pulling 5 days
+// of 30-minute bars gives the dip check actual intraday resolution while
+// staying within Yahoo's free, keyless chart API.
+async function fetchIntradayPrices(ticker: string): Promise<number[]> {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+    ticker,
+  )}?range=5d&interval=30m`;
+  try {
+    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
+    if (!res.ok) return [];
+    const data = await res.json();
+    const result = data?.chart?.result?.[0];
+    if (data?.chart?.error || !result) return [];
+    const closes: unknown[] = result?.indicators?.quote?.[0]?.close ?? [];
+    return closes.filter((n): n is number => typeof n === 'number' && Number.isFinite(n)).slice(-80);
+  } catch {
+    return [];
+  }
+}
+
+// ── Benchmark: SPY price, so the dashboard can show "vs. simply holding an
+// index fund" — the only honest way to tell whether this strategy is adding
+// value over a naive baseline rather than just riding a rising market.
+async function fetchBenchmarkPrice(): Promise<number | null> {
+  try {
+    const history = await fetchPriceHistory('SPY');
+    return history.length ? history[history.length - 1] : null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Hype classification ──────────────────────────────────────────────────
 // Correlates THREE independent signals so a single noisy source can't drive
 // a trade: how much MORE a ticker is being mentioned than usual (Reddit/
@@ -274,22 +326,47 @@ async function fetchPriceHistory(ticker: string): Promise<number[]> {
 // roughly agree do we call it "organic" and let the trading logic act on it.
 type Verdict = 'organic' | 'spike' | 'pure-hype';
 
+interface ClassificationResult {
+  hypeScore: number;
+  verdict: Verdict;
+  blocked: boolean;
+  reason: string;
+  // Exposed for `signal_snapshot` — so a future review can reconstruct
+  // exactly what the engine "believed" at the moment of a trade without
+  // re-deriving it from the prose `reason` string.
+  baselineMentions: number;
+  zScore: number;
+  priceTrendPct: number;
+  sentimentRatio: number | null;
+}
+
+// Hype score is now a proper rolling z-score of the mention count against its
+// own historical mean/stddev — scale-invariant and statistically meaningful,
+// unlike the previous ad-hoc linear transform `((x - baseline) / spread) *
+// 33.3 + 30` (arbitrary constants, not comparable across tickers with very
+// different mention-count volatility). A z-score of 0 sits at hype=50; +-3
+// standard deviations map to the 0..100 ends of the scale.
 function classify(
   mentionCount: number,
   history: SignalRow[],
   priceHistory: number[],
   sentiment: SentimentSummary | null,
-): { hypeScore: number; verdict: Verdict; blocked: boolean; reason: string } {
-  const baseline = history.length
-    ? history.reduce((sum, s) => sum + s.mention_count, 0) / history.length
-    : mentionCount;
-  const spread = Math.max(baseline, 1);
-  // Hype score: how far above its own baseline the mention count currently is,
-  // scaled into a 0-100 range (100 = 4x the historical average or more).
-  const hypeScore = Math.max(0, Math.min(100, ((mentionCount - baseline) / spread) * 33.3 + 30));
+): ClassificationResult {
+  const counts = history.map((s) => s.mention_count);
+  const n = counts.length;
+  const mean = n ? counts.reduce((sum, c) => sum + c, 0) / n : mentionCount;
+  const variance = n > 1 ? counts.reduce((sum, c) => sum + (c - mean) ** 2, 0) / (n - 1) : 0;
+  const stddev = Math.sqrt(variance);
+  // With <2 historical points, or zero variance (e.g. a brand-new ticker),
+  // fall back to a conservative neutral-ish z-score rather than dividing by
+  // zero or producing a wildly unstable first reading.
+  const zScore = stddev > 0 ? (mentionCount - mean) / stddev : mentionCount > mean ? 2 : 0;
+  const hypeScore = Math.max(0, Math.min(100, 50 + zScore * (50 / 3)));
+  const baseline = mean;
 
   const priceTrend =
     priceHistory.length >= 2 ? priceHistory[priceHistory.length - 1] - priceHistory[0] : 0;
+  const priceTrendPct = priceHistory.length >= 2 && priceHistory[0] !== 0 ? (priceTrend / priceHistory[0]) * 100 : 0;
   const priceFallingOrFlat = priceTrend <= 0;
   const isSpike = baseline > 0 && mentionCount > baseline * 3;
 
@@ -298,23 +375,26 @@ function classify(
   let sentimentNote = 'keine Stimmungsdaten verfügbar';
   let sentimentConfirmsBullish = false;
   let sentimentContradicts = false;
+  let sentimentRatio: number | null = null;
   if (sentiment && sentiment.bullish + sentiment.bearish >= 5) {
-    const ratio = sentiment.bullish / (sentiment.bullish + sentiment.bearish);
-    sentimentConfirmsBullish = ratio >= 0.55;
-    sentimentContradicts = ratio <= 0.4;
-    sentimentNote = `StockTwits-Stimmung ${(ratio * 100).toFixed(0)}% bullish (${sentiment.bullish}↑/${sentiment.bearish}↓)`;
+    sentimentRatio = sentiment.bullish / (sentiment.bullish + sentiment.bearish);
+    sentimentConfirmsBullish = sentimentRatio >= 0.55;
+    sentimentContradicts = sentimentRatio <= 0.4;
+    sentimentNote = `StockTwits-Stimmung ${(sentimentRatio * 100).toFixed(0)}% bullish (${sentiment.bullish}↑/${sentiment.bearish}↓)`;
   }
+
+  const common = { hypeScore, baselineMentions: baseline, zScore, priceTrendPct, sentimentRatio };
 
   // Pure hype: loud on Reddit, but neither the crowd's sentiment nor the price
   // backs it up — the textbook "pump" setup we must not chase.
   if (hypeScore > HYPE_BLOCK_THR && priceFallingOrFlat && !sentimentConfirmsBullish) {
     return {
-      hypeScore,
+      ...common,
       verdict: 'pure-hype',
       blocked: true,
       reason:
-        `Hype-Score ${hypeScore.toFixed(0)} > ${HYPE_BLOCK_THR} bei ${mentionCount} Erwähnungen ` +
-        `(Ø ${baseline.toFixed(1)}), Kurs fällt/stagniert seit ${priceHistory.length} Tagen, ${sentimentNote} ` +
+        `Hype-Score ${hypeScore.toFixed(0)} (z=${zScore.toFixed(1)}) > ${HYPE_BLOCK_THR} bei ${mentionCount} Erwähnungen ` +
+        `(Ø ${baseline.toFixed(1)}), Kurs fällt/stagniert (${priceTrendPct.toFixed(1)}% über ${priceHistory.length} Tage), ${sentimentNote} ` +
         `— keine fundamentale Bestätigung. Geblockt.`,
     };
   }
@@ -322,19 +402,19 @@ function classify(
   // moved — wait and watch instead of trading it.
   if (isSpike && (priceFallingOrFlat || sentimentContradicts)) {
     return {
-      hypeScore,
+      ...common,
       verdict: 'spike',
       blocked: false,
       reason:
-        `Mention-Spike (${mentionCount} vs. Ø ${baseline.toFixed(1)}), ${sentimentNote}, ` +
-        `ohne übereinstimmende Kursbewegung — verdächtig, wird beobachtet, aber nicht gehandelt.`,
+        `Mention-Spike (${mentionCount} vs. Ø ${baseline.toFixed(1)}, z=${zScore.toFixed(1)}), ${sentimentNote}, ` +
+        `ohne übereinstimmende Kursbewegung (${priceTrendPct.toFixed(1)}%) — verdächtig, wird beobachtet, aber nicht gehandelt.`,
     };
   }
   return {
-    hypeScore,
+    ...common,
     verdict: 'organic',
     blocked: false,
-    reason: `${mentionCount} Erwähnungen (Ø ${baseline.toFixed(1)}), ${sentimentNote}, Kursverlauf bestätigt die Richtung.`,
+    reason: `${mentionCount} Erwähnungen (Ø ${baseline.toFixed(1)}, z=${zScore.toFixed(1)}), ${sentimentNote}, Kursverlauf ${priceTrendPct >= 0 ? '+' : ''}${priceTrendPct.toFixed(1)}% bestätigt die Richtung.`,
   };
 }
 
@@ -444,9 +524,10 @@ Deno.serve(async () => {
       }
     }
 
-    for (const [ticker, priceHistory] of evaluationSet) {
-      const [sentiment, { data: history }] = await Promise.all([
+    for (const [ticker, dailyHistory] of evaluationSet) {
+      const [sentiment, intradayHistory, { data: history }] = await Promise.all([
         fetchStockTwitsSentiment(ticker),
+        fetchIntradayPrices(ticker),
         supabase
           .from('signals')
           .select('ticker, scanned_at, price, mention_count, hype_score')
@@ -461,17 +542,22 @@ Deno.serve(async () => {
         (apeWisdomMentions.get(ticker) ?? 0) + (supplementaryScores.get(ticker) ?? 0),
       );
 
-      if (priceHistory.length === 0) {
+      if (dailyHistory.length === 0) {
         log.push(`${ticker}: keine Kursdaten von Yahoo Finance erhalten — übersprungen.`);
         continue;
       }
-      const price = priceHistory[priceHistory.length - 1];
+      // Use the freshest intraday close we have as "current price" — daily
+      // closes lag by up to a trading day and would make every decision act
+      // on stale data. Fall back to the daily close only if Yahoo's intraday
+      // endpoint returned nothing for this ticker.
+      const recentPrices = intradayHistory.length > 0 ? intradayHistory : dailyHistory;
+      const price = recentPrices[recentPrices.length - 1];
       latestPrices.set(ticker, price);
 
-      const { hypeScore, verdict, blocked, reason } = classify(
+      const { hypeScore, verdict, blocked, reason, baselineMentions, zScore, priceTrendPct, sentimentRatio } = classify(
         mentionCount,
         (history ?? []) as SignalRow[],
-        priceHistory,
+        dailyHistory,
         sentiment,
       );
 
@@ -500,9 +586,11 @@ Deno.serve(async () => {
         if (change >= TAKE_PROFIT || change <= STOP_LOSS) {
           const grossAmount = position.shares * price;
           const fee = swissquoteFee(grossAmount);
-          const proceeds = grossAmount - fee;
+          const fx = fxFee(grossAmount);
+          const proceeds = grossAmount - fee - fx;
           const costBasis = position.shares * position.entry_price;
           const realizedPnl = proceeds - costBasis;
+          const exitReason: 'take-profit' | 'stop-loss' = change >= TAKE_PROFIT ? 'take-profit' : 'stop-loss';
 
           await supabase.from('transactions').insert({
             ticker,
@@ -510,10 +598,14 @@ Deno.serve(async () => {
             shares: position.shares,
             price,
             fee,
+            fx_fee: fx,
+            currency: 'USD',
             gross_amount: grossAmount,
             realized_pnl: realizedPnl,
+            opening_transaction_id: position.opening_transaction_id,
+            exit_reason: exitReason,
             reason:
-              change >= TAKE_PROFIT
+              exitReason === 'take-profit'
                 ? `Take-Profit erreicht: +${(change * 100).toFixed(1)}% seit Einstieg.`
                 : `Stop-Loss ausgelöst: ${(change * 100).toFixed(1)}% seit Einstieg.`,
           });
@@ -522,9 +614,9 @@ Deno.serve(async () => {
 
           portfolio.cash += proceeds;
           portfolio.realized_pnl += realizedPnl;
-          portfolio.total_fees += fee;
+          portfolio.total_fees += fee + fx;
           portfolio.trade_count += 1;
-          log.push(`${ticker}: SELL ${position.shares} @ ${price} (PnL ${realizedPnl.toFixed(2)} CHF)`);
+          log.push(`${ticker}: SELL ${position.shares} @ ${price} (PnL ${realizedPnl.toFixed(2)} CHF, Gebühren ${(fee + fx).toFixed(2)} CHF inkl. FX)`);
           continue;
         }
       }
@@ -535,7 +627,14 @@ Deno.serve(async () => {
         verdict === 'organic' &&
         positions.length < MAX_POSITIONS
       ) {
-        const recentHigh = Math.max(...priceHistory);
+        // Recent high comes from INTRADAY data (last ~5 trading days of 30-min
+        // bars) rather than daily closes — a -2.5% "dip from the recent high"
+        // measured against daily closes is a coarse, stale signal that a fast
+        // intraday swing can fully revert before the next 6-hourly scan even
+        // looks at it. Falls back to the daily series if Yahoo's intraday
+        // endpoint had nothing for this ticker.
+        const highSource = intradayHistory.length > 0 ? intradayHistory : dailyHistory;
+        const recentHigh = Math.max(...highSource);
         const dropFromHigh = (price - recentHigh) / recentHigh;
         if (dropFromHigh <= DIP_THRESH) {
           const totalValue =
@@ -543,31 +642,57 @@ Deno.serve(async () => {
             positions.reduce((sum, p) => sum + p.shares * (latestPrices.get(p.ticker) ?? p.entry_price), 0);
           const budget = totalValue * POSITION_SIZE;
           const fee = swissquoteFee(budget);
-          const investable = budget - fee;
+          const fx = fxFee(budget);
+          const investable = budget - fee - fx;
           const shares = investable > 0 ? investable / price : 0;
 
           if (shares > 0 && portfolio.cash >= budget) {
             const grossAmount = shares * price;
-            await supabase.from('transactions').insert({
-              ticker,
-              action: 'buy',
-              shares,
-              price,
-              fee,
-              gross_amount: grossAmount,
-              reason: `Dip erkannt: ${(dropFromHigh * 100).toFixed(1)}% unter dem ${HISTORY_LOOKBACK}-Tage-Hoch, Hype organisch & von Stimmung/Kurs bestätigt.`,
-            });
+            // Structured snapshot of every feature the engine considered —
+            // so a future review can run e.g. "of all organic-verdict buys,
+            // what fraction closed at take-profit vs. stop-loss, bucketed by
+            // hype-score-at-entry?" directly via SQL instead of re-deriving
+            // it from the prose `reason` string.
+            const signalSnapshot = {
+              hype_score: Math.round(hypeScore * 10) / 10,
+              z_score: Math.round(zScore * 100) / 100,
+              mention_count: mentionCount,
+              baseline_mentions: Math.round(baselineMentions * 10) / 10,
+              sentiment_ratio: sentimentRatio === null ? null : Math.round(sentimentRatio * 1000) / 1000,
+              price_trend_pct: Math.round(priceTrendPct * 100) / 100,
+              drop_from_high_pct: Math.round(dropFromHigh * 1000) / 10,
+              verdict,
+              intraday_points: intradayHistory.length,
+            };
+
+            const { data: txRow } = await supabase
+              .from('transactions')
+              .insert({
+                ticker,
+                action: 'buy',
+                shares,
+                price,
+                fee,
+                fx_fee: fx,
+                currency: 'USD',
+                gross_amount: grossAmount,
+                signal_snapshot: signalSnapshot,
+                reason: `Dip erkannt: ${(dropFromHigh * 100).toFixed(1)}% unter dem Intraday-Hoch (${highSource.length} Kurspunkte), Hype organisch (Score ${hypeScore.toFixed(0)}, z=${zScore.toFixed(1)}) & von Stimmung/Kurs bestätigt.`,
+              })
+              .select()
+              .single();
+
             const { data: inserted } = await supabase
               .from('positions')
-              .insert({ ticker, shares, entry_price: price })
+              .insert({ ticker, shares, entry_price: price, opening_transaction_id: txRow?.id ?? null })
               .select()
               .single();
             if (inserted) positions.push(inserted as PositionRow);
 
-            portfolio.cash -= grossAmount + fee;
-            portfolio.total_fees += fee;
+            portfolio.cash -= grossAmount + fee + fx;
+            portfolio.total_fees += fee + fx;
             portfolio.trade_count += 1;
-            log.push(`${ticker}: BUY ${shares.toFixed(4)} @ ${price} (fee ${fee} CHF)`);
+            log.push(`${ticker}: BUY ${shares.toFixed(4)} @ ${price} (Gebühren ${(fee + fx).toFixed(2)} CHF inkl. FX)`);
           }
         }
       }
@@ -583,10 +708,15 @@ Deno.serve(async () => {
       (sum, p) => sum + p.shares * (latestPrices.get(p.ticker) ?? p.entry_price),
       0,
     );
+    const spyPrice = await fetchBenchmarkPrice();
+    if (spyPrice === null) {
+      log.push('SPY-Benchmarkpreis konnte nicht geladen werden — Vergleichschart bleibt für diesen Lauf ohne neuen Punkt.');
+    }
     await supabase.from('balance_history').insert({
       cash: portfolio.cash,
       positions_value: positionsValue,
       total_value: portfolio.cash + positionsValue,
+      spy_price: spyPrice,
     });
 
     return new Response(JSON.stringify({ ok: true, log }, null, 2), {

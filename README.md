@@ -121,3 +121,80 @@ Einmaliges Setup:
 
 Das Frontend liest die Ergebnisse nur lesend (`anon`-Key, RLS erlaubt keine
 Schreibzugriffe von dort) — gehandelt wird ausschliesslich serverseitig.
+
+### Prozess-Verbesserungen v2 (FX-Kosten, Z-Score, Benchmark, Trade-Verknüpfung)
+
+Nach einer kritischen Durchsicht der Strategie wurden folgende Verbesserungen
+ergänzt (Migration: [`supabase/trading_schema_v2_migration.sql`](supabase/trading_schema_v2_migration.sql),
+rein additiv und idempotent — **einmalig im Supabase SQL-Editor ausführen**,
+nachdem `trading_schema.sql` bereits angewendet wurde):
+
+- **Realistische FX-Kosten**: Trades in US-Tickern von einem CHF-Konto aus
+  verursachen bei Swissquote zusätzlich zur Courtage eine
+  Devisen-Umtauschmarge (≈0,95&nbsp;%). Das wurde bisher ignoriert; jetzt
+  berechnet `fxFee()` in beiden Edge Functions diese Marge auf jeder
+  Transaktion und schreibt sie separat in die neuen Spalten
+  `transactions.currency` / `transactions.fx_fee` (zusätzlich zu `fee`,
+  der reinen Brokerage-Courtage). Das Dashboard summiert beide für
+  „Gesamtgebühren“ und zeigt sie in der Transaktionstabelle mit
+  „(inkl. FX)“-Hinweis kombiniert an.
+- **Z-Score statt Ad-hoc-Formel für den Hype-Score**: Die Klassifikation
+  vergleicht die aktuelle Erwähnungszahl jetzt über einen echten
+  Stichproben-Z-Score (`(x − μ) / σ` über die historischen Scans desselben
+  Tickers) mit dem Mittelwert, statt mit einer simplen Schwellen-Heuristik —
+  statistisch robuster bei unterschiedlich volatilen Tickern. Der Z-Score
+  fliesst auch in die geloggte `reason`-Begründung ein (`z=...`).
+- **Intraday-Kursdaten für Exit-Entscheidungen**: Zusätzlich zur täglichen
+  Historie holt `market-scan` jetzt 30-Minuten-Kerzen der letzten 5 Tage
+  (`fetchIntradayPrices`) und bevorzugt sie für den aktuellen Kurs und das
+  „Hoch der letzten Tage“ — Dip-/Exit-Erkennung reagiert dadurch deutlich
+  zeitnäher als auf Basis von Tagesschlusskursen, ohne dass deswegen öfter
+  der teure volle Scan laufen müsste (das übernimmt weiterhin
+  `price-refresh` alle 30 Minuten).
+- **SPY-Benchmark-Vergleich**: Jeder `balance_history`-Snapshot speichert
+  jetzt zusätzlich den aktuellen SPY-Kurs (`spy_price`). Das Dashboard
+  normiert ihn auf das Startkapital und zeichnet ihn als gestrichelte
+  Vergleichslinie neben der Portfoliokurve — die einzige Möglichkeit,
+  ehrlich zu beurteilen, ob die Strategie überhaupt einen Mehrwert
+  gegenüber „Geld einfach in einen Indexfonds stecken“ bietet.
+- **Strukturierte Trade-Verknüpfung & Snapshots fürs Lernen**: Jede
+  Kauf-Transaktion speichert jetzt einen JSON-„Signal-Snapshot“
+  (`signal_snapshot`: Hype-Score, Z-Score, Erwähnungen, Sentiment-Verhältnis,
+  Kurstrend, Abstand vom Hoch, Verdict, Anzahl Intraday-Datenpunkte) — der
+  komplette Merkmalsvektor zum Entscheidungszeitpunkt. Verkäufe verweisen
+  per `opening_transaction_id` zurück auf den eröffnenden Kauf und tragen
+  einen `exit_reason` (`take-profit` / `stop-loss` / `interim-take-profit` /
+  `interim-stop-loss`). Damit lassen sich künftig Fragen wie „wie performen
+  Trades mit hohem Z-Score im Schnitt?“ oder „wie lange werden Gewinner im
+  Schnitt gehalten?“ direkt per SQL beantworten, statt Freitext-Begründungen
+  manuell zu rekonstruieren.
+- **Neue Strategie-Kennzahlen im Dashboard**: Trefferquote, Ø Gewinn/Verlust,
+  maximaler Drawdown und Ø Haltedauer (aus verknüpften Buy→Sell-Paaren) — sie
+  beantworten „funktioniert die Strategie wirklich“, was die blosse
+  Gesamt-PnL-Zahl allein nicht zeigen kann (eine hohe Trefferquote mit
+  winzigen Gewinnen und seltenen riesigen Verlusten sieht in der Summe
+  identisch aus wie das Gegenteil).
+- **Scan-Frische-Anzeige**: Das Dashboard zeigt jetzt Zeitpunkt und Alter des
+  letzten `market-scan`-Laufs an und markiert ihn visuell, sobald er
+  deutlich älter als der reguläre 6-Stunden-Rhythmus ist — so fällt ein
+  lautlos hängengebliebener Cron-Job sofort auf, statt nur als unauffällig
+  flacher Chart zu erscheinen.
+- **Korrigierte Währungsbeschriftungen**: Aktienkurse, Einstiegspreise und
+  Watchlist-Preise sind tatsächlich in USD (nicht CHF, wie zuvor teils
+  beschriftet) — ein erläuternder Hinweis im Dashboard macht zudem
+  transparent, dass die Simulation 1 USD ≈ 1 CHF rechnet (kein
+  Wechselkursmodell), aber die reale FX-Marge als Gebühr abbildet.
+
+Bestehende Datensätze von vor der Migration behalten einfach ihre
+Default-/`null`-Werte (`currency='USD'`, `fx_fee=0`, `signal_snapshot=null`,
+`opening_transaction_id=null`, `exit_reason=null`, `spy_price=null`) — das
+spiegelt akkurat wider, dass diese Daten vor der ausführlicheren Protokollierung
+entstanden sind, statt Werte zu erfinden, die nie erhoben wurden.
+
+Nach der Migration müssen beide Edge Functions neu deployt werden, damit sie
+die neuen Spalten befüllen:
+
+```bash
+supabase functions deploy market-scan
+supabase functions deploy price-refresh
+```
