@@ -46,7 +46,7 @@ interface TradeMarkerMeta {
         <p>Die Trading-Simulation benötigt dieselbe Supabase-Verbindung wie oben beschrieben.</p>
       </div>
     } @else {
-      <h2 class="section-title">📈 Pump-&amp;-Dip-Simulation</h2>
+      <h2 class="section-title">🚀 Reddit-Stonks-Simulation 💎🙌📈</h2>
 
       <div class="tabs">
         <button type="button" class="tab" [class.active]="activeTab() === 'overview'" (click)="activeTab.set('overview')">

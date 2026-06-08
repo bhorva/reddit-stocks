@@ -10,7 +10,6 @@ import { TradingDashboardComponent } from './trading-dashboard.component';
   template: `
     <main class="container">
       <h1>Reddit Stocks</h1>
-      <p class="subtitle">Angular SPA + Supabase (PostgreSQL), gehostet auf GitHub Pages</p>
 
       @if (!supabase.configured) {
         <div class="notice">
@@ -36,10 +35,6 @@ import { TradingDashboardComponent } from './trading-dashboard.component';
       }
       h1 {
         margin-bottom: 0.25rem;
-      }
-      .subtitle {
-        color: #666;
-        margin-top: 0;
       }
       .notice {
         background: #fff8e1;
