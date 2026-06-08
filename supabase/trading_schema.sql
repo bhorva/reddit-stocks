@@ -113,6 +113,16 @@ alter table public.positions       enable row level security;
 alter table public.transactions    enable row level security;
 alter table public.balance_history enable row level security;
 
+-- `create policy` has no `if not exists` clause, so re-running this script
+-- (e.g. after adjusting the schema) would otherwise fail with
+-- "policy ... already exists". Drop-then-create makes it idempotent.
+drop policy if exists "Public read access" on public.watchlist;
+drop policy if exists "Public read access" on public.signals;
+drop policy if exists "Public read access" on public.portfolio;
+drop policy if exists "Public read access" on public.positions;
+drop policy if exists "Public read access" on public.transactions;
+drop policy if exists "Public read access" on public.balance_history;
+
 create policy "Public read access" on public.watchlist       for select using (true);
 create policy "Public read access" on public.signals         for select using (true);
 create policy "Public read access" on public.portfolio       for select using (true);
