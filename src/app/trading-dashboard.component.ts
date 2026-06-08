@@ -628,7 +628,13 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   // in the UI so it's clear at which thresholds a position would be closed.
   protected readonly activeTab = signal<'overview' | 'transactions'>('overview');
 
-  protected readonly takeProfit = 0.04;
+  // Mirrors the constants in both Edge Functions — see market-scan's
+  // breakeven-math comment for why TAKE_PROFIT is 0.08, not the more
+  // intuitive-looking 0.04: round-trip Swissquote fees + FX margin on a
+  // ~12%-of-portfolio position add up to ~6.3%, so anything below that isn't
+  // a real win once entry costs (which `realized_pnl` now also accounts for)
+  // are counted.
+  protected readonly takeProfit = 0.08;
   protected readonly stopLoss = -0.035;
   protected readonly maxPositions = 5;
 

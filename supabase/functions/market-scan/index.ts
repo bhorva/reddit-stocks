@@ -53,8 +53,17 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 // ── Strategy constants (mirrors the file.html prototype) ────────────────
 const POSITION_SIZE = 0.12; // fraction of total portfolio value per buy
 const DIP_THRESH = -0.025; // buy once price has dropped this much from its recent high
-const TAKE_PROFIT = 0.04; // sell once a position gains this much
-const STOP_LOSS = -0.035; // sell once a position loses this much
+
+// TAKE_PROFIT must clear the round-trip transaction cost, or "success" is an
+// illusion. For a ~12%-of-portfolio position (~1'160 CHF investable after
+// entry fees), Swissquote's brokerage fee (~25 CHF each way, at this size) +
+// the ~0.95% FX margin (each way) add up to roughly 6.3% of the position —
+// i.e. a +4% "win" actually loses the portfolio ~25 CHF once the entry costs
+// (which `realized_pnl` now correctly subtracts, see the sell branch below)
+// are counted. 8% leaves a comfortable ~1.5%-of-position margin above that
+// breakeven, so a take-profit exit is a genuine win, not a disguised loss.
+const TAKE_PROFIT = 0.08; // sell once a position gains this much
+const STOP_LOSS = -0.035; // sell once a position loses this much — a risk cut, not a profit target, so it doesn't need to clear the fee hurdle
 const MAX_POSITIONS = 5;
 const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 
@@ -148,6 +157,30 @@ function swissquoteFee(amount: number): number {
 // here is a USD-denominated US stock bought/sold from a CHF account.
 function fxFee(amount: number): number {
   return amount * FX_FEE_RATE;
+}
+
+/**
+ * Looks up the brokerage fee + FX margin paid when a position was OPENED, via
+ * its linked `opening_transaction_id` — needed so `realized_pnl` on the SELL
+ * can reflect the true round-trip cost rather than just the exit-side cost
+ * (see the comment at the realized_pnl computation for why that distinction
+ * matters). Returns zeros for legacy positions opened before the v2 migration
+ * (no link available) — same "predates the richer logging" convention as
+ * elsewhere, rather than guessing at a number we don't actually have.
+ */
+async function fetchOpeningCosts(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  openingTransactionId: number | null,
+): Promise<{ fee: number; fxFee: number }> {
+  if (openingTransactionId === null) return { fee: 0, fxFee: 0 };
+  const { data, error } = await supabase
+    .from('transactions')
+    .select('fee, fx_fee')
+    .eq('id', openingTransactionId)
+    .maybeSingle();
+  if (error || !data) return { fee: 0, fxFee: 0 };
+  return { fee: Number(data.fee) || 0, fxFee: Number(data.fx_fee) || 0 };
 }
 
 // ── Source 1 (primary): ApeWisdom — pre-aggregated Reddit mention ranking ─
@@ -589,7 +622,17 @@ Deno.serve(async () => {
           const fx = fxFee(grossAmount);
           const proceeds = grossAmount - fee - fx;
           const costBasis = position.shares * position.entry_price;
-          const realizedPnl = proceeds - costBasis;
+          // `costBasis` only covers what was actually invested (shares ×
+          // entry price) — the BUY's brokerage fee + FX margin were paid out
+          // of `cash` separately and never show up here. Without subtracting
+          // them too, `realized_pnl` looks rosier than the trade truly was:
+          // e.g. a +4% exit nets ~+11 CHF by this measure alone, while the
+          // portfolio's cash actually moved by roughly -25 CHF once the
+          // entry costs are counted — a "win" that's a real loss. Fetching
+          // the linked opening transaction (cheap: sells are infrequent)
+          // makes this number mean what it says.
+          const openingCosts = await fetchOpeningCosts(supabase, position.opening_transaction_id);
+          const realizedPnl = proceeds - costBasis - openingCosts.fee - openingCosts.fxFee;
           const exitReason: 'take-profit' | 'stop-loss' = change >= TAKE_PROFIT ? 'take-profit' : 'stop-loss';
 
           await supabase.from('transactions').insert({

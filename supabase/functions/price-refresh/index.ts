@@ -21,7 +21,13 @@
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 
-const TAKE_PROFIT = 0.04;
+// Kept in sync with `market-scan` — see the detailed breakeven-math comment
+// there for why TAKE_PROFIT was raised from 0.04: at the typical ~12%-of-
+// portfolio position size, Swissquote's brokerage fee + ~0.95% FX margin
+// (each way) add up to roughly 6.3% of the position, so a +4% "win" actually
+// cost the portfolio money once entry costs are counted too. 8% leaves
+// genuine profit margin above that breakeven.
+const TAKE_PROFIT = 0.08;
 const STOP_LOSS = -0.035;
 
 // Currency-conversion spread Swissquote charges on USD-denominated trades from
@@ -61,6 +67,29 @@ function fxFee(amount: number): number {
 
 async function fetchBenchmarkPrice(): Promise<number | null> {
   return fetchLatestPrice('SPY');
+}
+
+/**
+ * Looks up the brokerage fee + FX margin paid when a position was OPENED —
+ * needed so `realized_pnl` reflects the true round-trip cost, not just the
+ * exit-side cost (see the comment at the realized_pnl computation below).
+ * Mirrors the identically-named helper in `market-scan`; kept duplicated
+ * rather than shared since these two tiny Edge Functions intentionally have
+ * no shared module (simpler deploys, no risk of one breaking the other).
+ */
+async function fetchOpeningCosts(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  openingTransactionId: number | null,
+): Promise<{ fee: number; fxFee: number }> {
+  if (openingTransactionId === null) return { fee: 0, fxFee: 0 };
+  const { data, error } = await supabase
+    .from('transactions')
+    .select('fee, fx_fee')
+    .eq('id', openingTransactionId)
+    .maybeSingle();
+  if (error || !data) return { fee: 0, fxFee: 0 };
+  return { fee: Number(data.fee) || 0, fxFee: Number(data.fx_fee) || 0 };
 }
 
 // Same Yahoo Finance chart endpoint `market-scan` uses for daily history — but
@@ -129,7 +158,13 @@ Deno.serve(async () => {
         const fx = fxFee(grossAmount);
         const proceeds = grossAmount - fee - fx;
         const costBasis = position.shares * position.entry_price;
-        const realizedPnl = proceeds - costBasis;
+        // See `market-scan`'s sell branch for the full explanation: costBasis
+        // alone omits the BUY's brokerage fee + FX margin (paid out of cash
+        // separately), which made `realized_pnl` look more profitable than
+        // the trade truly was. Subtracting the linked opening transaction's
+        // costs makes the number honest.
+        const openingCosts = await fetchOpeningCosts(supabase, position.opening_transaction_id);
+        const realizedPnl = proceeds - costBasis - openingCosts.fee - openingCosts.fxFee;
         const interim = change >= TAKE_PROFIT ? 'interim-take-profit' : 'interim-stop-loss';
 
         await supabase.from('transactions').insert({
