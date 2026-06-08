@@ -2,11 +2,12 @@ import { Component, OnInit, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { SupabaseService, StockRow } from './supabase.service';
+import { TradingDashboardComponent } from './trading-dashboard.component';
 
 @Component({
   selector: 'app-root',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, TradingDashboardComponent],
   template: `
     <main class="container">
       <h1>Reddit Stocks</h1>
@@ -72,6 +73,8 @@ import { SupabaseService, StockRow } from './supabase.service';
           </table>
         }
       }
+
+      <app-trading-dashboard />
     </main>
   `,
   styles: [
