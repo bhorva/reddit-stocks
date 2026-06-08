@@ -202,7 +202,7 @@ Chart.register(...registerables);
         </div>
       </div>
 
-      <div [hidden]="activeTab() !== 'transactions'">
+      <div [hidden]="activeTab() !== 'transactions'" class="tx-wide">
         <div class="card">
           <h3>Transaktionshistorie</h3>
           @if (transactions().length === 0) {
@@ -215,6 +215,17 @@ Chart.register(...registerables);
             </div>
             <div class="tx-table-wrap">
               <table class="tx-table">
+                <colgroup>
+                  <col class="col-date" />
+                  <col class="col-action" />
+                  <col class="col-ticker" />
+                  <col class="col-shares" />
+                  <col class="col-price" />
+                  <col class="col-fee" />
+                  <col class="col-gross" />
+                  <col class="col-pnl" />
+                  <col class="col-reason" />
+                </colgroup>
                 <thead>
                   <tr>
                     <th>Datum</th>
@@ -267,6 +278,17 @@ Chart.register(...registerables);
       .grid-mid { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; margin-bottom: 1rem; }
       .grid-bot { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
       .grid-bot-single { grid-template-columns: 1fr; }
+      .tx-wide {
+        width: 100vw;
+        max-width: 1180px;
+        margin-left: calc(50% - 50vw);
+        margin-right: calc(50% - 50vw);
+        padding: 0 1rem;
+        box-sizing: border-box;
+      }
+      @media (max-width: 1180px) {
+        .tx-wide { width: auto; max-width: none; margin-left: 0; margin-right: 0; padding: 0; }
+      }
       @media (max-width: 900px) {
         .grid-top, .grid-mid, .grid-bot { grid-template-columns: 1fr; }
       }
@@ -333,8 +355,17 @@ Chart.register(...registerables);
       }
       .tab.active .tab-count { background: #ffe3d6; color: #ff4500; }
       .tx-summary { margin-bottom: 0.75rem; }
-      .tx-table-wrap { max-height: 520px; overflow: auto; }
-      .tx-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+      .tx-table-wrap { max-height: 560px; overflow-y: auto; overflow-x: hidden; }
+      .tx-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 0.78rem; }
+      .tx-table col.col-date { width: 13%; }
+      .tx-table col.col-action { width: 8%; }
+      .tx-table col.col-ticker { width: 8%; }
+      .tx-table col.col-shares { width: 9%; }
+      .tx-table col.col-price,
+      .tx-table col.col-fee,
+      .tx-table col.col-gross,
+      .tx-table col.col-pnl { width: 10%; }
+      .tx-table col.col-reason { width: 22%; }
       .tx-table th {
         text-align: left; font-size: 0.68rem; text-transform: uppercase; letter-spacing: .05em;
         color: #888; padding: 6px 8px; border-bottom: 1px solid #e2e2e2; position: sticky; top: 0; background: #fafafa;
@@ -343,8 +374,8 @@ Chart.register(...registerables);
       .tx-table tr:last-child td { border-bottom: none; }
       .tx-table tr.tx-buy td:first-child { border-left: 3px solid #1a8a3c; }
       .tx-table tr.tx-sell td:first-child { border-left: 3px solid #c0392b; }
-      .nowrap { white-space: nowrap; }
-      .tx-reason { color: #888; font-size: 0.74rem; min-width: 220px; }
+      .nowrap { word-break: break-word; }
+      .tx-reason { color: #888; font-size: 0.74rem; word-break: break-word; }
       .notice { background: #fff8e1; border: 1px solid #ffe082; border-radius: 8px; padding: 1rem; }
       .error { background: #fdecea; border: 1px solid #f5c6cb; color: #a12622; border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1rem; }
     `,
