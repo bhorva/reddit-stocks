@@ -70,11 +70,12 @@ Chart.register(...registerables);
         <div class="grid-mid">
           <div class="card">
             <h3>Portfolioentwicklung (CHF)</h3>
-            @if (balanceHistory().length === 0) {
-              <p class="muted">Noch keine Auswertung gelaufen.</p>
-            } @else {
-              <div class="chart-wrap"><canvas #chartCanvas></canvas></div>
-            }
+            <div class="chart-wrap">
+              <canvas #chartCanvas></canvas>
+              @if (balanceHistory().length === 0) {
+                <p class="muted chart-empty">Noch keine Auswertung gelaufen.</p>
+              }
+            </div>
           </div>
           <div class="card">
             <h3>Watchlist &amp; Signale</h3>
@@ -121,16 +122,53 @@ Chart.register(...registerables);
               <p class="muted">Keine offenen Positionen.</p>
             } @else {
               @for (p of positions(); track p.id) {
-                <div class="pos-row">
-                  <div>
+                <div class="pos-row pos-row-rich">
+                  <div class="pos-head">
                     <div class="pos-name">{{ p.ticker }}</div>
-                    <div class="pos-detail">
-                      {{ p.shares | number: '1.4-4' }} Stk. &#64; {{ p.entry_price | number: '1.2-2' }} CHF ·
-                      seit {{ p.opened_at | date: 'short' }}
-                    </div>
+                    @if (positionView(p).changePct !== null) {
+                      <span class="badge" [class.badge-organic]="positionView(p).changePct! >= 0" [class.badge-blocked]="positionView(p).changePct! < 0">
+                        {{ positionView(p).changePct! >= 0 ? '+' : '' }}{{ positionView(p).changePct! * 100 | number: '1.1-1' }}%
+                      </span>
+                    }
                   </div>
+                  <div class="pos-detail">
+                    {{ p.shares | number: '1.4-4' }} Stk. &#64; Einstieg {{ p.entry_price | number: '1.2-2' }} CHF
+                    @if (positionView(p).current !== null) {
+                      · aktuell {{ positionView(p).current | number: '1.2-2' }} CHF
+                    } @else {
+                      · noch kein aktueller Kurs erfasst
+                    }
+                    · seit {{ p.opened_at | date: 'short' }}
+                  </div>
+                  <div class="pos-detail">
+                    Positionswert {{ positionView(p).value | number: '1.2-2' }} CHF
+                    @if (positionView(p).unrealized !== null) {
+                      · unrealisiert
+                      <span [class.pos]="positionView(p).unrealized! >= 0" [class.neg]="positionView(p).unrealized! < 0">{{ positionView(p).unrealized | number: '1.2-2' }} CHF</span>
+                    }
+                  </div>
+                  @if (positionView(p).changePct !== null) {
+                    <div class="exit-bar-wrap" title="Position zwischen Stop-Loss ({{ stopLoss * 100 }}%) und Take-Profit (+{{ takeProfit * 100 }}%)">
+                      <div class="exit-bar-bg">
+                        <div class="exit-bar-zero"></div>
+                        <div
+                          class="exit-bar-marker"
+                          [style.left.%]="exitBarPosition(positionView(p).changePct!)"
+                          [style.background]="positionView(p).changePct! >= 0 ? '#1a8a3c' : '#c0392b'"
+                        ></div>
+                      </div>
+                      <div class="exit-bar-labels">
+                        <span>Stop {{ stopLoss * 100 }}%</span>
+                        <span>Take-Profit +{{ takeProfit * 100 }}%</span>
+                      </div>
+                    </div>
+                  }
                 </div>
               }
+              <div class="pos-summary muted">
+                Gesamtwert offener Positionen: {{ positionsValue() | number: '1.2-2' }} CHF
+                ({{ positions().length }} / {{ maxPositions }} Slots belegt)
+              </div>
             }
           </div>
           <div class="card">
@@ -185,6 +223,10 @@ Chart.register(...registerables);
       .neu { color: #c98a00; }
       .muted { color: #888; font-size: 0.85rem; }
       .chart-wrap { position: relative; height: 220px; }
+      .chart-empty {
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        margin: 0; pointer-events: none;
+      }
       table { width: 100%; border-collapse: collapse; }
       th { text-align: left; font-size: 0.7rem; text-transform: uppercase; letter-spacing: .06em; color: #888; padding: 4px 6px; border-bottom: 1px solid #e2e2e2; }
       td { padding: 6px; border-bottom: 1px solid #eee; vertical-align: middle; }
@@ -197,10 +239,24 @@ Chart.register(...registerables);
       .hype-bar-wrap { display: flex; align-items: center; gap: 6px; }
       .hype-bar-bg { flex: 1; background: #eee; border-radius: 4px; height: 6px; min-width: 50px; }
       .hype-bar-fill { height: 6px; border-radius: 4px; }
-      .pos-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #eee; }
+      .pos-row { padding: 10px 0; border-bottom: 1px solid #eee; }
       .pos-row:last-child { border-bottom: none; }
+      .pos-row-rich { display: flex; flex-direction: column; gap: 3px; }
+      .pos-head { display: flex; align-items: center; gap: 8px; }
       .pos-name { font-weight: 600; }
       .pos-detail { font-size: 0.75rem; color: #888; margin-top: 2px; }
+      .pos-summary { margin-top: 6px; font-size: 0.75rem; }
+      .exit-bar-wrap { margin-top: 4px; }
+      .exit-bar-bg { position: relative; background: #eee; border-radius: 4px; height: 6px; }
+      .exit-bar-zero {
+        position: absolute; top: -2px; bottom: -2px; left: calc(3.5 / 7.5 * 100%);
+        width: 1px; background: #bbb;
+      }
+      .exit-bar-marker {
+        position: absolute; top: -3px; width: 8px; height: 12px; border-radius: 3px;
+        transform: translateX(-50%);
+      }
+      .exit-bar-labels { display: flex; justify-content: space-between; font-size: 0.65rem; color: #aaa; margin-top: 5px; }
       .log { max-height: 340px; overflow-y: auto; font-size: 0.8rem; }
       .log-entry { padding: 8px 10px; margin-bottom: 6px; border-radius: 6px; border-left: 3px solid #ddd; background: #fafafa; line-height: 1.5; }
       .log-buy { border-color: #1a8a3c; }
@@ -213,6 +269,12 @@ Chart.register(...registerables);
 })
 export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestroy {
   protected readonly trading = inject(TradingService);
+
+  // Mirrors the constants in supabase/functions/market-scan/index.ts — shown
+  // in the UI so it's clear at which thresholds a position would be closed.
+  protected readonly takeProfit = 0.04;
+  protected readonly stopLoss = -0.035;
+  protected readonly maxPositions = 5;
 
   @ViewChild('chartCanvas') private chartCanvas?: ElementRef<HTMLCanvasElement>;
   private chart: Chart | null = null;
@@ -235,6 +297,13 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   }
 
   ngAfterViewInit(): void {
+    // The canvas is now ALWAYS in the DOM (see template), so it's safe to
+    // create the chart here even before any data has loaded — `renderChart`
+    // simply renders an empty chart, and later calls update it in place.
+    // (Previously the canvas only existed behind an `@if` gated on data being
+    // present, which raced with `ViewChild` resolution — `queueMicrotask`
+    // sometimes fired before Angular had inserted the canvas into the DOM,
+    // so the chart silently never rendered.)
     this.renderChart();
   }
 
@@ -262,12 +331,56 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       const latestSnapshot = balanceHistory[balanceHistory.length - 1];
       this.totalValue.set(latestSnapshot ? latestSnapshot.total_value : portfolio.cash);
 
-      queueMicrotask(() => this.renderChart());
+      this.renderChart();
     } catch (e) {
       this.error.set(this.toMessage(e));
     } finally {
       this.loading.set(false);
     }
+  }
+
+  /** Latest known price for a ticker, taken from its most recent signal row. */
+  protected currentPrice(ticker: string): number | null {
+    const signal = this.signals().find((s) => s.ticker === ticker);
+    return signal ? signal.price : null;
+  }
+
+  /**
+   * Bundles the derived, display-only numbers for one open position so the
+   * template can read them without recomputing piecemeal (Angular 17 has no
+   * `@let`, and recreating these per access would be wasteful/inconsistent).
+   */
+  protected positionView(p: PositionRow): {
+    current: number | null;
+    changePct: number | null;
+    unrealized: number | null;
+    value: number;
+  } {
+    const current = this.currentPrice(p.ticker);
+    const changePct = current !== null ? (current - p.entry_price) / p.entry_price : null;
+    const unrealized = current !== null ? (current - p.entry_price) * p.shares : null;
+    const value = (current ?? p.entry_price) * p.shares;
+    return { current, changePct, unrealized, value };
+  }
+
+  /** Sum of all open positions' mark-to-market value (using latest signal prices where available). */
+  protected positionsValue(): number {
+    return this.positions().reduce((sum, p) => sum + (this.currentPrice(p.ticker) ?? p.entry_price) * p.shares, 0);
+  }
+
+  /**
+   * Maps a position's current change-since-entry (e.g. -0.035 .. +0.04) onto a
+   * 0-100% horizontal position for the exit-range bar, which spans a bit
+   * wider than [stopLoss, takeProfit] so the marker doesn't sit at the very
+   * edge even when a position is right at its trigger.
+   */
+  protected exitBarPosition(changePct: number): number {
+    const span = this.takeProfit - this.stopLoss;
+    const padded = span * 1.25;
+    const center = (this.takeProfit + this.stopLoss) / 2;
+    const min = center - padded / 2;
+    const ratio = (changePct - min) / padded;
+    return Math.max(2, Math.min(98, ratio * 100));
   }
 
   protected hypeColor(score: number): string {
@@ -290,19 +403,34 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
 
   private renderChart(): void {
     const canvas = this.chartCanvas?.nativeElement;
-    const history = this.balanceHistory();
-    if (!canvas || history.length === 0) {
+    if (!canvas) {
       return;
     }
-    this.chart?.destroy();
+    const history = this.balanceHistory();
+    const labels = history.map((h) =>
+      new Date(h.recorded_at).toLocaleString('de-CH', { month: 'short', day: 'numeric', hour: '2-digit' }),
+    );
+    const data = history.map((h) => h.total_value);
+
+    if (this.chart) {
+      // Update the existing chart in place rather than destroying/recreating
+      // it — cheaper, avoids a flicker, and sidesteps any ViewChild timing
+      // issues since the canvas (and thus the Chart instance) now persists
+      // across data reloads.
+      this.chart.data.labels = labels;
+      this.chart.data.datasets[0].data = data;
+      this.chart.update();
+      return;
+    }
+
     this.chart = new Chart(canvas, {
       type: 'line',
       data: {
-        labels: history.map((h) => new Date(h.recorded_at).toLocaleString('de-CH', { month: 'short', day: 'numeric', hour: '2-digit' })),
+        labels,
         datasets: [
           {
             label: 'Portfoliowert (CHF)',
-            data: history.map((h) => h.total_value),
+            data,
             borderColor: '#4f8ef7',
             backgroundColor: 'rgba(79, 142, 247, 0.12)',
             fill: true,
