@@ -179,6 +179,14 @@ create policy "Public read access" on public.balance_history for select using (t
 -- portfolio's current value continuously, not just every 6 hours. It reuses
 -- the SAME Vault secrets (`service_role_key`); only the URL differs.
 --
+-- Both functions check real US-exchange trading hours (NYSE/NASDAQ, Mon-Fri
+-- 09:30-16:00 America/New_York) before doing anything that resembles placing
+-- an order — a real Swissquote account couldn't fill a US-equity trade outside
+-- that window either. `price-refresh` simply no-ops (cheap early return, no
+-- Yahoo Finance calls, no snapshot write) for the ~17h/day + weekends the
+-- market is closed, so scheduling it every 30 minutes round the clock is fine
+-- — most of those invocations cost essentially nothing.
+--
 -- 1. Deploy it once: supabase functions deploy price-refresh
 --
 -- 2. Schedule it to run every 30 minutes (adjust to taste — see README for

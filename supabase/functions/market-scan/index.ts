@@ -206,6 +206,46 @@ function fxFee(amount: number): number {
 }
 
 /**
+ * Best-effort check for whether the US exchanges this watchlist trades on
+ * (NYSE/NASDAQ — every ticker here is a USD-denominated US stock) are
+ * currently in their regular trading session. A real Swissquote account can
+ * only fill US-equity orders while the exchange itself is open — without this
+ * check the simulation could "buy" or "sell" at, say, 3am Swiss time on a
+ * Sunday, something no real account could ever do. That would make the
+ * simulation strictly more capable than reality, undermining the entire point
+ * of modelling realistic costs and constraints.
+ *
+ * Regular session: Mon–Fri, 09:30–16:00 America/New_York. Deliberately checked
+ * via `Intl.DateTimeFormat` with an explicit IANA timezone — that delegates
+ * the EST/EDT daylight-saving switch to the platform's tz database instead of
+ * hand-rolling fragile UTC-offset arithmetic that breaks twice a year.
+ *
+ * Deliberately NOT modelling the ~9 NYSE market holidays/year (Thanksgiving,
+ * Christmas, ...): several are "nth weekday of month" floating dates that'd
+ * need a hand-maintained, yearly-updated calendar — a lot of fragile
+ * bookkeeping for an edge case whose worst case is "the bot trades a few hours
+ * earlier than a real account could have, on ~9 days a year." An honestly
+ * disclosed simplification beats a brittle one.
+ */
+function isUsMarketOpen(now: Date = new Date()): boolean {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+    hourCycle: 'h23',
+  }).formatToParts(now);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  const weekday = get('weekday');
+  const minutesSinceMidnight = Number(get('hour')) * 60 + Number(get('minute'));
+
+  const isWeekday = weekday !== 'Sat' && weekday !== 'Sun';
+  const sessionStart = 9 * 60 + 30; // 09:30 ET
+  const sessionEnd = 16 * 60; // 16:00 ET
+  return isWeekday && minutesSinceMidnight >= sessionStart && minutesSinceMidnight < sessionEnd;
+}
+
+/**
  * Looks up the brokerage fee + FX margin paid when a position was OPENED, via
  * its linked `opening_transaction_id` — needed so `realized_pnl` on the SELL
  * can reflect the true round-trip cost rather than just the exit-side cost
@@ -606,6 +646,23 @@ Deno.serve(async () => {
   const supabase = createClient(supabaseUrl, serviceRoleKey);
 
   const log: string[] = [];
+
+  // Computed once per run: gates the BUY/SELL branches further down (a real
+  // account couldn't execute either while US exchanges are closed). Discovery,
+  // classification and `signals` logging stay UNGATED on purpose — Reddit
+  // hype doesn't pause on weekends/overnight, and continuing to record what we
+  // observe (using whatever price Yahoo last reported) keeps the mention/
+  // z-score history continuous, which `HISTORY_LOOKBACK` and the baseline
+  // statistics depend on. Gating those too would create artificial gaps every
+  // night and weekend, distorting the very baselines the strategy is built on.
+  const marketOpen = isUsMarketOpen();
+  log.push(
+    marketOpen
+      ? 'US-Börsen (NYSE/NASDAQ) sind aktuell geöffnet — Käufe/Verkäufe sind in diesem Lauf möglich.'
+      : 'US-Börsen (NYSE/NASDAQ) sind aktuell geschlossen (ausserhalb 09:30–16:00 America/New_York, Mo–Fr) — ' +
+          'Signale werden weiter erfasst, aber es werden keine Käufe/Verkäufe ausgeführt (ein echtes Konto könnte ohnehin nicht handeln).',
+  );
+
   try {
     const { data: portfolioRow, error: portfolioError } = await supabase
       .from('portfolio')
@@ -808,7 +865,21 @@ Deno.serve(async () => {
       const position = positions.find((p) => p.ticker === ticker);
       if (position) {
         const change = (price - position.entry_price) / position.entry_price;
-        if (change >= TAKE_PROFIT || change <= STOP_LOSS) {
+        const exitTriggered = change >= TAKE_PROFIT || change <= STOP_LOSS;
+        if (exitTriggered && !marketOpen) {
+          // The exit condition fired, but a real account couldn't place the
+          // order right now — log it so a glance at the run history explains
+          // *why* a seemingly-overdue exit didn't happen yet. `price-refresh`
+          // (which also respects market hours, see there) or the next
+          // in-hours `market-scan` run will catch it the moment trading
+          // resumes — same as a real standing order would.
+          log.push(
+            `${ticker}: Exit-Schwelle erreicht (${(change * 100).toFixed(1)}% seit Einstieg, ` +
+              `${change >= TAKE_PROFIT ? 'Take-Profit' : 'Stop-Loss'}), aber US-Börsen sind geschlossen — ` +
+              `Order wird beim nächsten Lauf innerhalb der Handelszeiten ausgeführt.`,
+          );
+        }
+        if (exitTriggered && marketOpen) {
           const grossAmount = position.shares * price;
           const fee = swissquoteFee(grossAmount);
           const fx = fxFee(grossAmount);
@@ -857,7 +928,16 @@ Deno.serve(async () => {
       }
 
       // ── Buy check: dip detected, room for a new position, organic verdict ──
+      // `marketOpen` gates this too — same reasoning as the sell check above:
+      // a real account can't open a US-equity position while NYSE/NASDAQ are
+      // closed. Unlike exits (time-sensitive, worth a per-ticker log line),
+      // a missed buy candidate simply reappears on the next in-hours
+      // evaluation — `dropFromHigh` is multi-week-anchored, so a few hours'
+      // delay changes nothing material. The run-level "markets closed" log
+      // line at the top already covers this; per-candidate noise here would
+      // just clutter the log without adding information.
       if (
+        marketOpen &&
         !position &&
         verdict === 'organic' &&
         positions.length < MAX_POSITIONS

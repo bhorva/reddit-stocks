@@ -70,6 +70,35 @@ function fxFee(amount: number): number {
   return amount * FX_FEE_RATE;
 }
 
+/**
+ * Mirrors the identically-named/-implemented helper in `market-scan` (see
+ * there for the full reasoning) — kept duplicated rather than shared per this
+ * project's "no shared module between the two tiny Edge Functions" convention.
+ *
+ * Gates this function's entire run (see the check at the top of `Deno.serve`):
+ * a real Swissquote account can't fill US-equity orders while NYSE/NASDAQ are
+ * closed, and prices don't move between closes either — so re-pricing
+ * positions and checking exit triggers outside the regular session would be
+ * pure overhead that can't lead to a real action.
+ */
+function isUsMarketOpen(now: Date = new Date()): boolean {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+    hourCycle: 'h23',
+  }).formatToParts(now);
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+  const weekday = get('weekday');
+  const minutesSinceMidnight = Number(get('hour')) * 60 + Number(get('minute'));
+
+  const isWeekday = weekday !== 'Sat' && weekday !== 'Sun';
+  const sessionStart = 9 * 60 + 30; // 09:30 ET
+  const sessionEnd = 16 * 60; // 16:00 ET
+  return isWeekday && minutesSinceMidnight >= sessionStart && minutesSinceMidnight < sessionEnd;
+}
+
 async function fetchBenchmarkPrice(): Promise<number | null> {
   return fetchLatestPrice('SPY');
 }
@@ -126,6 +155,32 @@ async function fetchLatestPrice(ticker: string): Promise<number | null> {
 }
 
 Deno.serve(async () => {
+  // Skip the entire run while US exchanges are closed: no exit could be
+  // executed even if one triggered, prices haven't moved since the last
+  // close (so re-fetching them is wasted Yahoo Finance calls), and writing a
+  // `balance_history` snapshot would just repeat the same total_value as a
+  // redundant flat-line point — `market-scan` already provides snapshot
+  // continuity every 6h regardless of market hours (see the `marketOpen`
+  // comment there for why ITS snapshot stays ungated). Cheap to check first,
+  // before even creating the Supabase client.
+  if (!isUsMarketOpen()) {
+    return new Response(
+      JSON.stringify(
+        {
+          ok: true,
+          log: [
+            'US-Börsen (NYSE/NASDAQ) sind aktuell geschlossen (ausserhalb 09:30–16:00 America/New_York, Mo–Fr) — ' +
+              'Lauf übersprungen: kein Repricing, kein Exit-Check, kein Snapshot nötig (ein echtes Konto könnte ' +
+              'ohnehin nicht handeln, und die Kurse bewegen sich nicht zwischen den Schlusskursen).',
+          ],
+        },
+        null,
+        2,
+      ),
+      { headers: { 'Content-Type': 'application/json' } },
+    );
+  }
+
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
   const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
   const supabase = createClient(supabaseUrl, serviceRoleKey);
