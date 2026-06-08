@@ -737,7 +737,17 @@ interface MissedOpportunityView {
                       </td>
                       <td class="nowrap">
                         @if (t.realized_pnl !== null) {
-                          <span [class.pos]="t.realized_pnl >= 0" [class.neg]="t.realized_pnl < 0">{{ t.realized_pnl | number: '1.2-2' }} CHF</span>
+                          <span [class.pos]="t.realized_pnl >= 0" [class.neg]="t.realized_pnl < 0">
+                            {{ t.realized_pnl >= 0 ? '+' : '' }}{{ t.realized_pnl | number: '1.2-2' }} CHF
+                          </span>
+                          @if (buyForSell(t); as buy) {
+                            <div
+                              class="muted pnl-buy-hint"
+                              [title]="'Position eröffnet am ' + (buy.created_at | date: 'dd.MM.yy HH:mm') + ' zu ' + (buy.price | number: '1.2-2') + ' USD/Stk.'"
+                            >
+                              eingekauft für {{ buy.gross_amount | number: '1.2-2' }} CHF
+                            </div>
+                          }
                         } @else {
                           <span class="muted">—</span>
                         }
@@ -997,6 +1007,11 @@ interface MissedOpportunityView {
       .chart-note { margin: 0.5rem 0 0; line-height: 1.4; font-size: 0.72rem; }
       .stat-sub-inline { font-size: 0.78rem; color: #888; }
       .fee-fx-hint { font-size: 0.65rem; color: #aaa; }
+      /* Secondary line under a SELL's realized P&L showing what the closed
+         position originally cost — same visual weight/role as .fee-fx-hint
+         above (a quiet supporting detail, not competing with the colour-coded
+         headline number it sits beneath). */
+      .pnl-buy-hint { font-size: 0.65rem; color: #aaa; white-space: nowrap; margin-top: 2px; }
       /*
         Small "info" badge placed next to headings/column labels for complex
         metrics (hype score, z-score, drawdown, ...). Uses the native HTML
@@ -1329,6 +1344,35 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
         t.reason.toUpperCase().includes(term),
     );
   });
+
+  /**
+   * Buy-transaction lookup by id — lets the log show "this SELL closed a
+   * position that was opened for X CHF" right next to its (already
+   * colour-coded green/red) realized P&L, so the two numbers that actually
+   * answer "was this a good trade?" sit side by side instead of requiring a
+   * manual scroll-and-match through the log. Same `opening_transaction_id`
+   * link `avgHoldingHours`/`tickerLeaderboard` already build their own
+   * `buysById` maps to follow — only
+   * trades made after the v2 migration carry it; older sells simply show no
+   * buy-amount hint, the same "honestly absent, not guessed at" convention
+   * used throughout this log (see e.g. `usd_chf_rate`'s doc comment).
+   */
+  private readonly buyByOpeningId = computed(() => {
+    const map = new Map<number, TransactionRow>();
+    for (const t of this.transactions()) {
+      if (t.action === 'buy') map.set(t.id, t);
+    }
+    return map;
+  });
+
+  /** The opening BUY for a given SELL row, or `null` if it's a buy itself, an
+   *  unlinked legacy sell, or (edge case) the linked buy fell out of the
+   *  loaded page of `transactions` (the log is paginated, see
+   *  `TradingService.getTransactionLog`). */
+  protected buyForSell(t: TransactionRow): TransactionRow | null {
+    if (t.action !== 'sell' || t.opening_transaction_id === null) return null;
+    return this.buyByOpeningId().get(t.opening_transaction_id) ?? null;
+  }
 
   // How long after the expected 6-hourly cadence we start flagging the last
   // scan as possibly stuck — generous enough to not false-positive on a
