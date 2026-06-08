@@ -77,8 +77,11 @@ cloud-freundliche Quellen ein und korreliert sie:
   schlüssellose Stimmungsquelle (bullish/bearish-Tags der Trading-Community),
   die als Korrelations-Check dient: bestätigt die breite Masse den Hype, oder
   wirkt er einseitig fabriziert?
-- **[Stooq](https://stooq.com/)** — echte Kurshistorie als fundamentale
-  „hat sich der Kurs wirklich bewegt"-Bestätigung.
+- **[Yahoo Finance](https://query1.finance.yahoo.com/)** — echte Kurshistorie
+  über die öffentliche, schlüssellose Chart-JSON-API als fundamentale
+  „hat sich der Kurs wirklich bewegt"-Bestätigung. (Ursprünglich nutzten wir
+  Stooq, dessen CSV-Endpunkt inzwischen aber eine JS-Bot-Verifizierungsseite
+  statt Daten liefert — auch ausserhalb von Cloud-IPs.)
 
 Erst wenn Erwähnungs-Spitzen, Stimmung **und** Kursverlauf übereinstimmend
 „organisch" aussehen, gilt ein Ticker als handelbar — eine einzelne, laute

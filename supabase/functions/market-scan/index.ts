@@ -6,7 +6,7 @@
 //      independent signal sources (no fixed ticker list — the watchlist is
 //      reseeded with whatever is hot right now)
 //   2. correlates mention counts with crowd sentiment and price history,
-//      and fetches each candidate's price (Stooq, no API key needed)
+//      and fetches each candidate's price (Yahoo Finance, no API key needed)
 //   3. classifies the signal as organic / spike / pure-hype
 //   4. applies the pump-&-dip trading strategy and logs every trade
 //   5. records a portfolio balance snapshot for the chart
@@ -40,8 +40,11 @@
 //                    CORRELATE: a mention spike that the wider trading crowd
 //                    actually agrees is bullish looks "organic"; a spike with
 //                    flat/bearish sentiment looks like manufactured "hype".
-//   • Stooq       — free daily price history (already used), the fundamental
-//                    "did the market actually move" check.
+//   • Yahoo Finance — free daily price history via the public chart JSON API
+//                    (no key needed); the fundamental "did the market
+//                    actually move" check. (We switched to this from Stooq's
+//                    CSV endpoint, which started serving a JS bot-check page
+//                    instead of data — observed even from non-cloud IPs.)
 //
 // SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are provided automatically.
 
@@ -58,7 +61,7 @@ const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 const HISTORY_LOOKBACK = 8; // how many past signal rows to use for the hype baseline
 
 // ── Dynamic ticker discovery ─────────────────────────────────────────────
-const CANDIDATE_POOL_SIZE = 25; // top mention-ranked candidates to validate against Stooq
+const CANDIDATE_POOL_SIZE = 25; // top mention-ranked candidates to validate against Yahoo Finance
 const HOT_LIST_SIZE = 10; // how many validated tickers make the active watchlist
 
 const CASHTAG_RE = /\$([A-Z]{1,5})\b/g;
@@ -238,19 +241,28 @@ async function fetchStockTwitsSentiment(ticker: string): Promise<SentimentSummar
   }
 }
 
-// ── Prices: Stooq daily CSV, no API key required ─────────────────────────
+// ── Prices: Yahoo Finance public chart JSON, no API key required ─────────
+// Stooq's CSV endpoint started returning a JS bot-verification page instead
+// of data (`This site requires JavaScript to verify your browser`) — even
+// from residential IPs, so it's not a cloud-blocking issue, just a dead
+// source. Yahoo's public `/v8/finance/chart` JSON endpoint is free, keyless,
+// and gives us the same daily-close history we need.
 async function fetchPriceHistory(ticker: string): Promise<number[]> {
-  const url = `https://stooq.com/q/d/l/?s=${encodeURIComponent(ticker.toLowerCase())}.us&i=d`;
-  const res = await fetch(url);
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
+    ticker,
+  )}?range=1mo&interval=1d`;
+  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
   if (!res.ok) {
-    throw new Error(`Stooq fetch failed for ${ticker}: ${res.status}`);
+    throw new Error(`Yahoo Finance fetch failed for ${ticker}: ${res.status}`);
   }
-  const csv = await res.text();
-  const lines = csv.trim().split('\n').slice(1); // drop header row
-  const closes = lines
-    .map((line) => parseFloat(line.split(',')[4]))
-    .filter((n) => Number.isFinite(n));
-  return closes.slice(-30); // last ~30 trading days, oldest first
+  const data = await res.json();
+  const result = data?.chart?.result?.[0];
+  if (data?.chart?.error || !result) {
+    throw new Error(`Yahoo Finance has no data for ${ticker}`);
+  }
+  const closes: unknown[] = result?.indicators?.quote?.[0]?.close ?? [];
+  const valid = closes.filter((n): n is number => typeof n === 'number' && Number.isFinite(n));
+  return valid.slice(-30); // last ~30 trading days, oldest first
 }
 
 // ── Hype classification ──────────────────────────────────────────────────
@@ -258,7 +270,7 @@ async function fetchPriceHistory(ticker: string): Promise<number[]> {
 // a trade: how much MORE a ticker is being mentioned than usual (Reddit/
 // ApeWisdom + supplementary direct scan), whether the wider crowd actually
 // agrees with a bullish read (StockTwits sentiment), and whether the price
-// itself confirms the story (Stooq). Only when mentions, sentiment AND price
+// itself confirms the story (Yahoo Finance). Only when mentions, sentiment AND price
 // roughly agree do we call it "organic" and let the trading logic act on it.
 type Verdict = 'organic' | 'spike' | 'pure-hype';
 
@@ -356,7 +368,7 @@ Deno.serve(async () => {
     // candidate list: ApeWisdom (pre-aggregated Reddit mentions, weighted
     // highest since it's purpose-built and reliable from cloud IPs) plus the
     // best-effort direct-Reddit cashtag scan (counts as a bonus when it gets
-    // through). Then validate each candidate against Stooq (real, listed
+    // through). Then validate each candidate against Yahoo Finance (real, listed
     // ticker with price data) until the hot list is full.
     const [apeWisdomMentions, supplementaryScores] = await Promise.all([
       fetchApeWisdomRanking(),
@@ -387,7 +399,7 @@ Deno.serve(async () => {
           hotPriceHistory.set(symbol, history);
         }
       } catch {
-        // Not a real/listed ticker (or Stooq has nothing for it) — skip.
+        // Not a real/listed ticker (or Yahoo Finance has nothing for it) — skip.
       }
     }
     log.push(`Entdeckt & validiert: ${[...hotPriceHistory.keys()].join(', ') || '(keine)'}`);
@@ -450,7 +462,7 @@ Deno.serve(async () => {
       );
 
       if (priceHistory.length === 0) {
-        log.push(`${ticker}: keine Kursdaten von Stooq erhalten — übersprungen.`);
+        log.push(`${ticker}: keine Kursdaten von Yahoo Finance erhalten — übersprungen.`);
         continue;
       }
       const price = priceHistory[priceHistory.length - 1];
