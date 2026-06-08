@@ -17,6 +17,8 @@ import {
   SignalRow,
   TradingService,
   TransactionRow,
+  VerdictPerformanceRow,
+  ZScoreBucketPerformanceRow,
 } from './trading.service';
 
 Chart.register(...registerables);
@@ -44,7 +46,11 @@ Chart.register(...registerables);
             <span class="tab-count">{{ transactions().length }}</span>
           }
         </button>
-        <span class="scan-freshness muted" [class.scan-stale]="scanIsStale()">
+        <span
+          class="scan-freshness muted"
+          [class.scan-stale]="scanIsStale()"
+          [title]="'Der grosse Markt-Scan (Auswertung neuer Trends, Käufe) läuft alle ~6 Stunden automatisch im Hintergrund. Diese Anzeige zeigt, wann er zuletzt lief — wirkt sie deutlich älter, könnte der automatische Job hängengeblieben sein. (Eine separate, schlankere Funktion prüft offene Positionen alle 30 Minuten unabhängig davon.)'"
+        >
           @if (lastScanAt(); as t) {
             Letzter Scan: {{ t | date: 'dd.MM. HH:mm' }} ({{ scanAgeLabel() }})
             @if (scanIsStale()) { · evtl. hängengeblieben? }
@@ -104,7 +110,7 @@ Chart.register(...registerables);
             </div>
           </div>
           <div class="card">
-            <h3>Hype-Blocks</h3>
+            <h3>Hype-Blocks <span class="info-icon" tabindex="0" title="Anzahl Aktien, bei denen die Engine einen Erwähnungs-Anstieg als reinen, unbegründeten Hype eingestuft und deshalb BEWUSST NICHT gehandelt hat ('Pure-Hype'-Verdict). Das verhinderte Kapital, das damit nicht riskiert wurde, steht darunter — eine Wette, die nicht eingegangen wurde, ist hier ein Erfolg, kein verpasster Gewinn (zumindest, wenn die Klassifikation stimmt — siehe 'Lern-Insights' weiter unten).">ⓘ</span></h3>
             <div class="stat-value neu">{{ portfolio()?.blocked_count ?? 0 }}</div>
             <div class="stat-sub">{{ portfolio()?.blocked_capital | number: '1.2-2' }} CHF nicht riskiert</div>
           </div>
@@ -118,7 +124,7 @@ Chart.register(...registerables);
         -->
         <div class="grid-top grid-top-metrics">
           <div class="card">
-            <h3>Trefferquote</h3>
+            <h3>Trefferquote <span class="info-icon" tabindex="0" title="Anteil der bereits abgeschlossenen (verkauften) Trades, die mit Gewinn endeten. Sagt für sich allein noch nichts über die Höhe von Gewinnen/Verlusten aus — siehe daneben.">ⓘ</span></h3>
             @if (winRate(); as wr) {
               <div class="stat-value" [class.pos]="wr >= 50" [class.neg]="wr < 50">{{ wr | number: '1.0-0' }}%</div>
               <div class="stat-sub">{{ winCount() }} Gewinner · {{ lossCount() }} Verlierer von {{ closedTrades().length }} geschlossenen Trades</div>
@@ -128,7 +134,7 @@ Chart.register(...registerables);
             }
           </div>
           <div class="card">
-            <h3>Ø Gewinn / Ø Verlust</h3>
+            <h3>Ø Gewinn / Ø Verlust <span class="info-icon" tabindex="0" title="Wie viel im Schnitt bei einem gewonnenen bzw. verlorenen Trade heraus­kommt. Wichtig im Zusammenspiel mit der Trefferquote: Eine hohe Trefferquote mit vielen kleinen Gewinnen und seltenen, riesigen Verlusten kann unterm Strich trotzdem ein Verlustgeschäft sein (und umgekehrt).">ⓘ</span></h3>
             @if (avgWin() !== null || avgLoss() !== null) {
               <div class="stat-value">
                 <span class="pos">{{ avgWin() !== null ? '+' + (avgWin() | number: '1.2-2') : '–' }}</span>
@@ -143,7 +149,7 @@ Chart.register(...registerables);
             }
           </div>
           <div class="card">
-            <h3>Max. Drawdown</h3>
+            <h3>Max. Drawdown <span class="info-icon" tabindex="0" title="Der grösste Rückgang vom bisherigen Höchststand des Portfoliowerts bis zum darauffolgenden Tiefpunkt — zeigt, wie schmerzhaft die schlimmste bisherige Durststrecke war, selbst wenn die Gesamtbilanz am Ende positiv ausfällt. Ein Standard-Risikomass aus der Finanzwelt.">ⓘ</span></h3>
             @if (maxDrawdownPct(); as dd) {
               <div class="stat-value neg">−{{ dd | number: '1.1-1' }}%</div>
               <div class="stat-sub">grösster Rückgang vom bisherigen Höchststand des Portfoliowerts</div>
@@ -153,7 +159,7 @@ Chart.register(...registerables);
             }
           </div>
           <div class="card">
-            <h3>Ø Haltedauer</h3>
+            <h3>Ø Haltedauer <span class="info-icon" tabindex="0" title="Wie lange eine Position im Schnitt gehalten wird, bevor sie verkauft wird — egal ob durch Take-Profit, Stop-Loss oder einen Zwischen-Check. Kurze Haltedauern bei volatilen Aktien können auf 'Lärm' statt echte Trends hindeuten.">ⓘ</span></h3>
             @if (avgHoldingHours(); as h) {
               <div class="stat-value">{{ formatHoldingDuration(h) }}</div>
               <div class="stat-sub">über alle verknüpften Buy→Sell-Paare hinweg</div>
@@ -166,7 +172,10 @@ Chart.register(...registerables);
 
         <div class="grid-mid">
           <div class="card">
-            <h3>Portfolioentwicklung vs. SPY (CHF, normiert)</h3>
+            <h3>
+              Portfolioentwicklung vs. SPY (CHF, normiert)
+              <span class="info-icon" tabindex="0" title="Die blaue Linie ist der Wert unseres simulierten Portfolios über die Zeit. Die gestrichelte graue Linie zeigt, was dasselbe Startkapital wert wäre, hätte man es stattdessen einfach in den Aktienindex-Fonds SPY (S&P 500) gesteckt — auf denselben Startwert 'normiert', damit die beiden Linien fair vergleichbar sind. Liegt unsere Linie darunter, hätte ein simpler Indexfonds besser abgeschnitten als die aktive Strategie.">ⓘ</span>
+            </h3>
             <div class="chart-wrap">
               <canvas #chartCanvas></canvas>
               @if (balanceHistory().length === 0) {
@@ -189,7 +198,15 @@ Chart.register(...registerables);
               <table>
                 <thead>
                   <tr>
-                    <th>Ticker</th><th>Preis (USD)</th><th>Erwähnungen</th><th>Hype</th><th>Verdict</th>
+                    <th>Ticker</th><th>Preis (USD)</th><th>Erwähnungen</th>
+                    <th>
+                      Hype
+                      <span class="info-icon" tabindex="0" title="Misst, wie ungewöhnlich oft eine Aktie GERADE JETZT in Reddit/StockTwits erwähnt wird, verglichen mit ihrem üblichen Niveau (statistischer Z-Score, auf 0–100 skaliert). Hoch = aktuell viel Gerede — sagt für sich allein noch nichts darüber aus, ob das Gerede berechtigt ist (das entscheidet erst das 'Verdict').">ⓘ</span>
+                    </th>
+                    <th>
+                      Verdict
+                      <span class="info-icon" tabindex="0" title="Versucht zu unterscheiden, ob ein Erwähnungs-Anstieg von echter Kursbewegung & Stimmung begleitet wird ('Organisch' = handelbar) oder nur heisse Luft ist ('Spike' = verdächtig, wird beobachtet aber nicht gehandelt; 'Geblockt' = als reiner Hype eingestuft, kein Trade).">ⓘ</span>
+                    </th>
                   </tr>
                 </thead>
                 <tbody>
@@ -273,6 +290,118 @@ Chart.register(...registerables);
                 Gesamtwert offener Positionen: {{ positionsValue() | number: '1.2-2' }} CHF
                 ({{ positions().length }} / {{ maxPositions }} Slots belegt)
               </div>
+            }
+          </div>
+        </div>
+
+        <!--
+          "Lern-Insights": surfaces the trade_outcomes_by_verdict /
+          trade_outcomes_by_zscore_bucket SQL views (see
+          trading_schema_v3_signal_performance_views.sql) — they turn the
+          structured signal_snapshot data captured since the v2 migration into
+          the question that actually matters for improving the strategy: "does
+          our hype classification / z-score heuristic predict outcomes, or
+          are the thresholds just guesswork?". Intentionally rendered as an
+          (initially empty) card now — it'll start filling in on its own as
+          more v2-era trades close, with no further changes needed.
+        -->
+        <div class="grid-bot grid-bot-single">
+          <div class="card">
+            <h3>
+              Lern-Insights: Treffen unsere Heuristiken zu?
+              <span
+                class="info-icon"
+                tabindex="0"
+                title="Diese Tabellen vergleichen, was die Engine beim Kauf über eine Aktie 'dachte' (Verdict, Hype-/Z-Score) mit dem tatsächlichen Ergebnis des Trades. So lässt sich nachvollziehen, ob die Klassifikations-Schwellenwerte sinnvoll sind oder angepasst werden sollten — datenbasiert statt aus dem Bauch heraus."
+              >ⓘ</span>
+            </h3>
+            @if (verdictPerformance().length === 0 && zScorePerformance().length === 0) {
+              <p class="muted">
+                Noch nicht genug abgeschlossene, verknüpfte Trades für eine aussagekräftige
+                Auswertung (Faustregel: mindestens 20–30 pro Gruppe). Diese Karte füllt sich
+                automatisch, sobald künftige Käufe verkauft wurden — vorausgesetzt, die
+                Migration <code>trading_schema_v3_signal_performance_views.sql</code> wurde
+                bereits ausgeführt. Bis dahin: nichts zu tun, einfach laufen lassen.
+              </p>
+            } @else {
+              @if (verdictPerformance().length > 0) {
+                <div class="insights-block">
+                  <h4>
+                    Nach Verdict (Organisch / Spike / Pure-Hype)
+                    <span class="info-icon" tabindex="0" title="Die Engine stuft jede Aktie beim Scan als 'organisch' (handelbar), 'spike' (verdächtig, wird nur beobachtet) oder 'pure-hype' (blockiert) ein. Hier siehst du, ob diese Einschätzung beim jeweiligen Trade auch tatsächlich gestimmt hat.">ⓘ</span>
+                  </h4>
+                  <table class="insights-table">
+                    <thead>
+                      <tr>
+                        <th>Verdict</th><th>Trades</th><th>Trefferquote</th>
+                        <th>Ø PnL (CHF)</th><th>Ø Haltedauer</th><th>Take-Profit / Stop-Loss</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      @for (v of verdictPerformance(); track v.verdict) {
+                        <tr>
+                          <td><span class="badge" [class]="verdictClassFor(v.verdict)">{{ verdictLabelFor(v.verdict) }}</span></td>
+                          <td>{{ v.closed_trades }}</td>
+                          <td>
+                            @if (v.win_rate_pct !== null) {
+                              <span [class.pos]="v.win_rate_pct >= 50" [class.neg]="v.win_rate_pct < 50">{{ v.win_rate_pct | number: '1.0-0' }}%</span>
+                              <span class="muted"> ({{ v.wins }}/{{ v.losses }})</span>
+                            } @else { <span class="muted">—</span> }
+                          </td>
+                          <td>
+                            @if (v.avg_realized_pnl !== null) {
+                              <span [class.pos]="v.avg_realized_pnl >= 0" [class.neg]="v.avg_realized_pnl < 0">{{ v.avg_realized_pnl | number: '1.2-2' }}</span>
+                            } @else { <span class="muted">—</span> }
+                          </td>
+                          <td>{{ v.avg_holding_hours !== null ? formatHoldingDuration(v.avg_holding_hours) : '—' }}</td>
+                          <td class="muted">{{ v.exits_take_profit }} / {{ v.exits_stop_loss }}</td>
+                        </tr>
+                      }
+                    </tbody>
+                  </table>
+                </div>
+              }
+              @if (zScorePerformance().length > 0) {
+                <div class="insights-block">
+                  <h4>
+                    Nach Stärke des Erwähnungs-Spikes (Z-Score)
+                    <span class="info-icon" tabindex="0" title="Der Z-Score misst, wie ungewöhnlich die Erwähnungszahl einer Aktie gerade verglichen mit ihrem üblichen Niveau ist (z.B. z=3 bedeutet 'dreimal so weit vom Durchschnitt entfernt wie normal'). Hier zeigt sich, ob besonders starke Spikes eher gute oder eher schlechte Trades waren — also ob 'viral' eher früh-Signal oder später Hype-Gipfel ist.">ⓘ</span>
+                  </h4>
+                  <table class="insights-table">
+                    <thead>
+                      <tr>
+                        <th>Z-Score-Bereich</th><th>Trades</th><th>Trefferquote</th>
+                        <th>Ø PnL (CHF)</th><th>Ø Kurstrend vorher</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      @for (z of zScorePerformance(); track z.z_score_bucket) {
+                        <tr>
+                          <td>{{ z.z_score_bucket }}</td>
+                          <td>{{ z.closed_trades }}</td>
+                          <td>
+                            @if (z.win_rate_pct !== null) {
+                              <span [class.pos]="z.win_rate_pct >= 50" [class.neg]="z.win_rate_pct < 50">{{ z.win_rate_pct | number: '1.0-0' }}%</span>
+                              <span class="muted"> ({{ z.wins }})</span>
+                            } @else { <span class="muted">—</span> }
+                          </td>
+                          <td>
+                            @if (z.avg_realized_pnl !== null) {
+                              <span [class.pos]="z.avg_realized_pnl >= 0" [class.neg]="z.avg_realized_pnl < 0">{{ z.avg_realized_pnl | number: '1.2-2' }}</span>
+                            } @else { <span class="muted">—</span> }
+                          </td>
+                          <td class="muted">{{ z.avg_price_trend_pct !== null ? (z.avg_price_trend_pct | number: '1.1-1') + '%' : '—' }}</td>
+                        </tr>
+                      }
+                    </tbody>
+                  </table>
+                </div>
+              }
+              <p class="muted insights-hint">
+                Faustregel: Aussagen erst ab ~20–30 Trades pro Gruppe ernst nehmen — bei
+                weniger ist „die Heuristik funktioniert“ kaum von „wir hatten Glück/Pech“ zu
+                unterscheiden.
+              </p>
             }
           </div>
         </div>
@@ -440,6 +569,28 @@ Chart.register(...registerables);
       .grid-top-metrics { grid-template-columns: repeat(4, 1fr); }
       .stat-sub-inline { font-size: 0.78rem; color: #888; }
       .fee-fx-hint { font-size: 0.65rem; color: #aaa; }
+      /*
+        Small "info" badge placed next to headings/column labels for complex
+        metrics (hype score, z-score, drawdown, ...). Uses the native HTML
+        title attribute for the hover tooltip — no extra JS/overlay machinery
+        needed, and it works with keyboard focus (tabindex) and screen
+        readers for free.
+      */
+      .info-icon {
+        display: inline-flex; align-items: center; justify-content: center;
+        width: 15px; height: 15px; margin-left: 3px; border-radius: 50%;
+        background: #eef1f6; color: #7a8699; font-size: 0.62rem; font-style: normal;
+        font-weight: 700; cursor: help; vertical-align: middle; line-height: 1;
+      }
+      .info-icon:hover, .info-icon:focus-visible {
+        background: #dbe4f3; color: #4f8ef7; outline: none;
+      }
+      .insights-block { margin-bottom: 1rem; }
+      .insights-block h4 { font-size: 0.85rem; margin: 0 0 0.5rem; }
+      .insights-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+      .insights-table th, .insights-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #eee; }
+      .insights-table th { color: #888; font-weight: 600; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.02em; }
+      .insights-hint { margin: 0.5rem 0 0; }
       @media (max-width: 900px) {
         .grid-top-metrics { grid-template-columns: 1fr 1fr; }
       }
@@ -493,6 +644,8 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   protected readonly balanceHistory = signal<BalanceHistoryRow[]>([]);
   protected readonly signals = signal<SignalRow[]>([]);
   protected readonly lastScanAt = signal<string | null>(null);
+  protected readonly verdictPerformance = signal<VerdictPerformanceRow[]>([]);
+  protected readonly zScorePerformance = signal<ZScoreBucketPerformanceRow[]>([]);
 
   protected readonly totalValue = signal(0);
 
@@ -526,13 +679,24 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     this.loading.set(true);
     this.error.set(null);
     try {
-      const [portfolio, positions, transactions, balanceHistory, signals, lastScanAt] = await Promise.all([
+      const [
+        portfolio,
+        positions,
+        transactions,
+        balanceHistory,
+        signals,
+        lastScanAt,
+        verdictPerformance,
+        zScorePerformance,
+      ] = await Promise.all([
         this.trading.getPortfolio(),
         this.trading.getPositions(),
         this.trading.getTransactionLog(),
         this.trading.getBalanceHistory(),
         this.trading.getWatchlistSignals(),
         this.trading.getLastScanTime(),
+        this.trading.getVerdictPerformance(),
+        this.trading.getZScoreBucketPerformance(),
       ]);
       this.portfolio.set(portfolio);
       this.positions.set(positions);
@@ -540,6 +704,8 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       this.balanceHistory.set(balanceHistory);
       this.signals.set(signals);
       this.lastScanAt.set(lastScanAt);
+      this.verdictPerformance.set(verdictPerformance);
+      this.zScorePerformance.set(zScorePerformance);
 
       const latestSnapshot = balanceHistory[balanceHistory.length - 1];
       this.totalValue.set(latestSnapshot ? latestSnapshot.total_value : portfolio.cash);
@@ -740,6 +906,27 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     if (s.blocked) return 'badge badge-blocked';
     if (s.verdict === 'spike') return 'badge badge-spike';
     return 'badge badge-organic';
+  }
+
+  /**
+   * Same labeling as `verdictLabel`/`verdictClass`, but for the raw
+   * `verdict` string stored in a BUY's `signal_snapshot` (as read back via
+   * the `trade_outcomes_by_verdict` view) rather than a live `SignalRow` —
+   * there's no separate `blocked` flag here since blocked tickers are never
+   * bought in the first place.
+   */
+  protected verdictLabelFor(verdict: string): string {
+    if (verdict === 'spike') return 'Spike';
+    if (verdict === 'pure-hype') return 'Pure-Hype';
+    if (verdict === 'organic') return 'Organisch';
+    return 'Unbekannt';
+  }
+
+  protected verdictClassFor(verdict: string): string {
+    if (verdict === 'spike') return 'badge badge-spike';
+    if (verdict === 'pure-hype') return 'badge badge-blocked';
+    if (verdict === 'organic') return 'badge badge-organic';
+    return 'badge';
   }
 
   private renderChart(): void {

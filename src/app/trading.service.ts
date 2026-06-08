@@ -114,6 +114,35 @@ export class TradingService {
     }
     return [...latestByTicker.values()];
   }
+
+  /**
+   * Reads the `trade_outcomes_by_verdict` / `trade_outcomes_by_zscore_bucket`
+   * views (see `trading_schema_v3_signal_performance_views.sql`) — they turn
+   * the structured `signal_snapshot` data captured since the v2 migration into
+   * "does our hype classification / z-score actually predict outcomes?".
+   *
+   * Both queries fail soft (return `[]`) rather than throwing: the views won't
+   * exist until the v3 migration has been run, and even after that they'll be
+   * empty until enough v2-era trades have closed — neither case should break
+   * the rest of the dashboard, it should just render as "not enough data yet".
+   */
+  async getVerdictPerformance(): Promise<VerdictPerformanceRow[]> {
+    const { data, error } = await this.getClient().from('trade_outcomes_by_verdict').select('*');
+    if (error) {
+      console.warn('trade_outcomes_by_verdict nicht verfügbar (Migration v3 ausgeführt?):', error.message);
+      return [];
+    }
+    return (data ?? []) as VerdictPerformanceRow[];
+  }
+
+  async getZScoreBucketPerformance(): Promise<ZScoreBucketPerformanceRow[]> {
+    const { data, error } = await this.getClient().from('trade_outcomes_by_zscore_bucket').select('*');
+    if (error) {
+      console.warn('trade_outcomes_by_zscore_bucket nicht verfügbar (Migration v3 ausgeführt?):', error.message);
+      return [];
+    }
+    return (data ?? []) as ZScoreBucketPerformanceRow[];
+  }
 }
 
 export interface PortfolioRow {
@@ -172,6 +201,31 @@ export interface BalanceHistoryRow {
   positions_value: number;
   total_value: number;
   spy_price: number | null;
+}
+
+/** Row of `trade_outcomes_by_verdict` — see trading_schema_v3_signal_performance_views.sql */
+export interface VerdictPerformanceRow {
+  verdict: string;
+  closed_trades: number;
+  wins: number;
+  losses: number;
+  win_rate_pct: number | null;
+  avg_realized_pnl: number | null;
+  total_realized_pnl: number | null;
+  avg_holding_hours: number | null;
+  exits_take_profit: number;
+  exits_stop_loss: number;
+}
+
+/** Row of `trade_outcomes_by_zscore_bucket` — see trading_schema_v3_signal_performance_views.sql */
+export interface ZScoreBucketPerformanceRow {
+  z_score_bucket: string;
+  closed_trades: number;
+  wins: number;
+  win_rate_pct: number | null;
+  avg_realized_pnl: number | null;
+  avg_z_score_in_bucket: number | null;
+  avg_price_trend_pct: number | null;
 }
 
 export interface SignalRow {
