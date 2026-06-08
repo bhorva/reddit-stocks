@@ -44,7 +44,22 @@ Chart.register(...registerables);
             <span class="tab-count">{{ transactions().length }}</span>
           }
         </button>
+        <span class="scan-freshness muted" [class.scan-stale]="scanIsStale()">
+          @if (lastScanAt(); as t) {
+            Letzter Scan: {{ t | date: 'dd.MM. HH:mm' }} ({{ scanAgeLabel() }})
+            @if (scanIsStale()) { · evtl. hängengeblieben? }
+          } @else {
+            Noch kein Scan gelaufen.
+          }
+        </span>
       </div>
+
+      <p class="muted fx-note">
+        Hinweis: Aktienkurse stammen von US-Börsen (USD). Die Simulation rechnet
+        1 USD ≈ 1 CHF (kein Wechselkursmodell), bildet aber die reale
+        Devisen-Umtauschmarge von Swissquote (≈0,95&nbsp;% pro Transaktion) als
+        zusätzliche Gebühr ab — Portfoliowert &amp; Gebühren sind in CHF, Aktienpreise in USD.
+      </p>
 
       @if (error()) {
         <div class="error">{{ error() }}</div>
@@ -95,15 +110,76 @@ Chart.register(...registerables);
           </div>
         </div>
 
+        <!--
+          Performance metrics derived from closed trades — these are what
+          actually answer "is the strategy any good", which raw P&L alone
+          doesn't: a high win rate with tiny wins and rare huge losses (or
+          vice versa) looks identical in the headline number above.
+        -->
+        <div class="grid-top grid-top-metrics">
+          <div class="card">
+            <h3>Trefferquote</h3>
+            @if (winRate(); as wr) {
+              <div class="stat-value" [class.pos]="wr >= 50" [class.neg]="wr < 50">{{ wr | number: '1.0-0' }}%</div>
+              <div class="stat-sub">{{ winCount() }} Gewinner · {{ lossCount() }} Verlierer von {{ closedTrades().length }} geschlossenen Trades</div>
+            } @else {
+              <div class="stat-value muted">—</div>
+              <div class="stat-sub">Noch keine geschlossenen Trades.</div>
+            }
+          </div>
+          <div class="card">
+            <h3>Ø Gewinn / Ø Verlust</h3>
+            @if (avgWin() !== null || avgLoss() !== null) {
+              <div class="stat-value">
+                <span class="pos">{{ avgWin() !== null ? '+' + (avgWin() | number: '1.2-2') : '–' }}</span>
+                <span class="muted"> / </span>
+                <span class="neg">{{ avgLoss() !== null ? (avgLoss() | number: '1.2-2') : '–' }}</span>
+                <span class="stat-sub-inline"> CHF</span>
+              </div>
+              <div class="stat-sub">pro geschlossenem Trade (realisierter PnL)</div>
+            } @else {
+              <div class="stat-value muted">—</div>
+              <div class="stat-sub">Noch keine geschlossenen Trades.</div>
+            }
+          </div>
+          <div class="card">
+            <h3>Max. Drawdown</h3>
+            @if (maxDrawdownPct(); as dd) {
+              <div class="stat-value neg">−{{ dd | number: '1.1-1' }}%</div>
+              <div class="stat-sub">grösster Rückgang vom bisherigen Höchststand des Portfoliowerts</div>
+            } @else {
+              <div class="stat-value muted">—</div>
+              <div class="stat-sub">Noch zu wenige Datenpunkte.</div>
+            }
+          </div>
+          <div class="card">
+            <h3>Ø Haltedauer</h3>
+            @if (avgHoldingHours(); as h) {
+              <div class="stat-value">{{ formatHoldingDuration(h) }}</div>
+              <div class="stat-sub">über alle verknüpften Buy→Sell-Paare hinweg</div>
+            } @else {
+              <div class="stat-value muted">—</div>
+              <div class="stat-sub">Erfordert verknüpfte Trades (ab dieser Version geloggt).</div>
+            }
+          </div>
+        </div>
+
         <div class="grid-mid">
           <div class="card">
-            <h3>Portfolioentwicklung (CHF)</h3>
+            <h3>Portfolioentwicklung vs. SPY (CHF, normiert)</h3>
             <div class="chart-wrap">
               <canvas #chartCanvas></canvas>
               @if (balanceHistory().length === 0) {
                 <p class="muted chart-empty">Noch keine Auswertung gelaufen.</p>
               }
             </div>
+            @if (!hasBenchmarkData()) {
+              <p class="muted chart-note">
+                Vergleichslinie (gestrichelt) erscheint, sobald die nächsten Scan-Läufe
+                den SPY-Referenzkurs mitschreiben (Migration v2 erforderlich) — sie zeigt,
+                was dasselbe Startkapital bei einer simplen Index-Anlage wert wäre.
+              </p>
+            }
           </div>
           <div class="card">
             <h3>Watchlist &amp; Signale</h3>
@@ -113,7 +189,7 @@ Chart.register(...registerables);
               <table>
                 <thead>
                   <tr>
-                    <th>Ticker</th><th>Preis</th><th>Erwähnungen</th><th>Hype</th><th>Verdict</th>
+                    <th>Ticker</th><th>Preis (USD)</th><th>Erwähnungen</th><th>Hype</th><th>Verdict</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -160,9 +236,9 @@ Chart.register(...registerables);
                     }
                   </div>
                   <div class="pos-detail">
-                    {{ p.shares | number: '1.4-4' }} Stk. &#64; Einstieg {{ p.entry_price | number: '1.2-2' }} CHF
+                    {{ p.shares | number: '1.4-4' }} Stk. &#64; Einstieg {{ p.entry_price | number: '1.2-2' }} USD
                     @if (positionView(p).current !== null) {
-                      · aktuell {{ positionView(p).current | number: '1.2-2' }} CHF
+                      · aktuell {{ positionView(p).current | number: '1.2-2' }} USD
                     } @else {
                       · noch kein aktueller Kurs erfasst
                     }
@@ -232,10 +308,10 @@ Chart.register(...registerables);
                     <th>Aktion</th>
                     <th>Ticker</th>
                     <th>Menge</th>
-                    <th>Kurs</th>
-                    <th>Gebühr</th>
+                    <th>Kurs (USD)</th>
+                    <th>Gebühr (CHF)</th>
                     <th>Brutto</th>
-                    <th>PnL</th>
+                    <th>PnL (CHF)</th>
                     <th>Begründung</th>
                   </tr>
                 </thead>
@@ -250,9 +326,12 @@ Chart.register(...registerables);
                       </td>
                       <td class="ticker">{{ t.ticker }}</td>
                       <td class="nowrap">{{ t.shares | number: '1.4-4' }}</td>
-                      <td class="nowrap">{{ t.price | number: '1.2-2' }} CHF</td>
-                      <td class="nowrap">{{ t.fee | number: '1.2-2' }} CHF</td>
-                      <td class="nowrap">{{ t.gross_amount | number: '1.2-2' }} CHF</td>
+                      <td class="nowrap">{{ t.price | number: '1.2-2' }}</td>
+                      <td class="nowrap" [title]="'Brokerage ' + (t.fee | number: '1.2-2') + ' + FX-Marge ' + (t.fx_fee | number: '1.2-2') + ' CHF'">
+                        {{ (t.fee + t.fx_fee) | number: '1.2-2' }}
+                        @if (t.fx_fee > 0) { <span class="muted fee-fx-hint">(inkl. FX)</span> }
+                      </td>
+                      <td class="nowrap">{{ t.gross_amount | number: '1.2-2' }}</td>
                       <td class="nowrap">
                         @if (t.realized_pnl !== null) {
                           <span [class.pos]="t.realized_pnl >= 0" [class.neg]="t.realized_pnl < 0">{{ t.realized_pnl | number: '1.2-2' }} CHF</span>
@@ -354,6 +433,16 @@ Chart.register(...registerables);
         border-radius: 20px; padding: 1px 7px;
       }
       .tab.active .tab-count { background: #ffe3d6; color: #ff4500; }
+      .scan-freshness { margin-left: auto; align-self: center; font-size: 0.72rem; white-space: nowrap; }
+      .scan-stale { color: #d9534f; font-weight: 600; }
+      .fx-note { margin: -0.5rem 0 1rem; line-height: 1.4; }
+      .chart-note { margin: 0.5rem 0 0; line-height: 1.4; font-size: 0.72rem; }
+      .grid-top-metrics { grid-template-columns: repeat(4, 1fr); }
+      .stat-sub-inline { font-size: 0.78rem; color: #888; }
+      .fee-fx-hint { font-size: 0.65rem; color: #aaa; }
+      @media (max-width: 900px) {
+        .grid-top-metrics { grid-template-columns: 1fr 1fr; }
+      }
       .tx-summary { margin-bottom: 0.75rem; }
       .tx-table-wrap { max-height: 560px; overflow-y: auto; overflow-x: hidden; }
       .tx-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 0.78rem; }
@@ -403,8 +492,14 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   protected readonly transactions = signal<TransactionRow[]>([]);
   protected readonly balanceHistory = signal<BalanceHistoryRow[]>([]);
   protected readonly signals = signal<SignalRow[]>([]);
+  protected readonly lastScanAt = signal<string | null>(null);
 
   protected readonly totalValue = signal(0);
+
+  // How long after the expected 6-hourly cadence we start flagging the last
+  // scan as possibly stuck — generous enough to not false-positive on a
+  // slightly-delayed run, tight enough to actually catch a dead cron job.
+  private static readonly SCAN_STALE_AFTER_MS = 9 * 60 * 60 * 1000;
 
   ngOnInit(): void {
     if (this.trading.configured) {
@@ -431,18 +526,20 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     this.loading.set(true);
     this.error.set(null);
     try {
-      const [portfolio, positions, transactions, balanceHistory, signals] = await Promise.all([
+      const [portfolio, positions, transactions, balanceHistory, signals, lastScanAt] = await Promise.all([
         this.trading.getPortfolio(),
         this.trading.getPositions(),
         this.trading.getTransactionLog(),
         this.trading.getBalanceHistory(),
         this.trading.getWatchlistSignals(),
+        this.trading.getLastScanTime(),
       ]);
       this.portfolio.set(portfolio);
       this.positions.set(positions);
       this.transactions.set(transactions);
       this.balanceHistory.set(balanceHistory);
       this.signals.set(signals);
+      this.lastScanAt.set(lastScanAt);
 
       const latestSnapshot = balanceHistory[balanceHistory.length - 1];
       this.totalValue.set(latestSnapshot ? latestSnapshot.total_value : portfolio.cash);
@@ -493,7 +590,123 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   }
 
   protected totalFeesInLog(): number {
-    return this.transactions().reduce((sum, t) => sum + t.fee, 0);
+    return this.transactions().reduce((sum, t) => sum + t.fee + t.fx_fee, 0);
+  }
+
+  // ── Data freshness ───────────────────────────────────────────────────────
+  // `market-scan` runs every ~6h; if `lastScanAt` falls noticeably further
+  // behind than that, the cron job has likely stopped firing — and without
+  // this indicator the dashboard would look identical to a healthy one (just
+  // a flat chart), making a silent outage easy to miss.
+  protected scanAgeMs(): number | null {
+    const t = this.lastScanAt();
+    return t ? Date.now() - new Date(t).getTime() : null;
+  }
+
+  protected scanIsStale(): boolean {
+    const age = this.scanAgeMs();
+    return age !== null && age > TradingDashboardComponent.SCAN_STALE_AFTER_MS;
+  }
+
+  protected scanAgeLabel(): string {
+    const age = this.scanAgeMs();
+    if (age === null) return '';
+    const hours = age / 36e5;
+    if (hours < 1) return `vor ${Math.max(1, Math.round(age / 60000))} Min.`;
+    if (hours < 48) return `vor ${hours.toFixed(1)} Std.`;
+    return `vor ${(hours / 24).toFixed(1)} Tagen`;
+  }
+
+  // ── Strategy performance metrics ─────────────────────────────────────────
+  // These are what actually answer "is the strategy working", which the
+  // headline P&L number alone can't: a high win rate with tiny wins and rare
+  // huge losses (or the reverse) produces an identical-looking total.
+  protected closedTrades(): TransactionRow[] {
+    return this.transactions().filter((t) => t.action === 'sell' && t.realized_pnl !== null);
+  }
+
+  protected winCount(): number {
+    return this.closedTrades().filter((t) => (t.realized_pnl ?? 0) > 0).length;
+  }
+
+  protected lossCount(): number {
+    return this.closedTrades().filter((t) => (t.realized_pnl ?? 0) < 0).length;
+  }
+
+  protected winRate(): number | null {
+    const closed = this.closedTrades();
+    return closed.length ? (this.winCount() / closed.length) * 100 : null;
+  }
+
+  protected avgWin(): number | null {
+    const wins = this.closedTrades().filter((t) => (t.realized_pnl ?? 0) > 0);
+    return wins.length ? wins.reduce((sum, t) => sum + (t.realized_pnl ?? 0), 0) / wins.length : null;
+  }
+
+  protected avgLoss(): number | null {
+    const losses = this.closedTrades().filter((t) => (t.realized_pnl ?? 0) < 0);
+    return losses.length ? losses.reduce((sum, t) => sum + (t.realized_pnl ?? 0), 0) / losses.length : null;
+  }
+
+  /**
+   * Average holding duration across BUY→SELL pairs that are explicitly linked
+   * via `opening_transaction_id` (only trades made after the v2 migration —
+   * older rows have no link and are silently excluded rather than guessed at).
+   */
+  protected avgHoldingHours(): number | null {
+    const buysById = new Map(this.transactions().filter((t) => t.action === 'buy').map((t) => [t.id, t]));
+    const durations: number[] = [];
+    for (const sell of this.closedTrades()) {
+      if (sell.opening_transaction_id === null) continue;
+      const buy = buysById.get(sell.opening_transaction_id);
+      if (!buy) continue;
+      durations.push((new Date(sell.created_at).getTime() - new Date(buy.created_at).getTime()) / 36e5);
+    }
+    return durations.length ? durations.reduce((sum, h) => sum + h, 0) / durations.length : null;
+  }
+
+  protected formatHoldingDuration(hours: number): string {
+    if (hours < 48) return `${hours.toFixed(1)} Std.`;
+    return `${(hours / 24).toFixed(1)} Tage`;
+  }
+
+  /**
+   * Largest peak-to-trough decline of the portfolio's total value over the
+   * recorded history — a standard risk metric that "realized P&L" alone
+   * doesn't capture (a strategy can be net-positive while having survived a
+   * terrifying 40% dip along the way).
+   */
+  protected maxDrawdownPct(): number | null {
+    const values = this.balanceHistory().map((h) => h.total_value);
+    if (values.length < 2) return null;
+    let peak = values[0];
+    let maxDrawdown = 0;
+    for (const value of values) {
+      if (value > peak) peak = value;
+      if (peak > 0) maxDrawdown = Math.max(maxDrawdown, (peak - value) / peak);
+    }
+    return maxDrawdown * 100;
+  }
+
+  // ── Benchmark comparison ─────────────────────────────────────────────────
+  // "Would the same starting capital simply parked in an index ETF have done
+  // better?" is the one question that tells you whether a strategy adds real
+  // value or just rides a rising market — so we track SPY alongside every
+  // balance snapshot and normalize it to the same starting capital here.
+  protected hasBenchmarkData(): boolean {
+    return this.balanceHistory().some((h) => h.spy_price !== null && h.spy_price !== undefined);
+  }
+
+  protected benchmarkSeries(): (number | null)[] {
+    const history = this.balanceHistory();
+    const initialValue = history.length ? history[0].total_value : 10000;
+    const reference = history.find((h) => h.spy_price !== null && h.spy_price !== undefined)?.spy_price ?? null;
+    if (reference === null) {
+      return history.map(() => null);
+    }
+    return history.map((h) =>
+      h.spy_price !== null && h.spy_price !== undefined ? initialValue * (h.spy_price / reference) : null,
+    );
   }
 
   /**
@@ -539,6 +752,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       new Date(h.recorded_at).toLocaleString('de-CH', { month: 'short', day: 'numeric', hour: '2-digit' }),
     );
     const data = history.map((h) => h.total_value);
+    const benchmark = this.benchmarkSeries();
 
     if (this.chart) {
       // Update the existing chart in place rather than destroying/recreating
@@ -547,6 +761,9 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       // across data reloads.
       this.chart.data.labels = labels;
       this.chart.data.datasets[0].data = data;
+      if (this.chart.data.datasets[1]) {
+        this.chart.data.datasets[1].data = benchmark;
+      }
       this.chart.update();
       return;
     }
@@ -565,12 +782,23 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
             tension: 0.25,
             pointRadius: 0,
           },
+          {
+            label: 'SPY (normiert auf Startkapital)',
+            data: benchmark,
+            borderColor: '#9aa3b2',
+            backgroundColor: 'transparent',
+            borderDash: [6, 4],
+            fill: false,
+            tension: 0.25,
+            pointRadius: 0,
+            spanGaps: true,
+          },
         ],
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
+        plugins: { legend: { display: true, position: 'bottom', labels: { boxWidth: 16 } } },
         scales: {
           x: { ticks: { maxTicksLimit: 8 } },
           y: { ticks: { callback: (v) => `${v} CHF` } },

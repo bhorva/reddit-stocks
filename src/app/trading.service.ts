@@ -76,6 +76,26 @@ export class TradingService {
     return ((data ?? []) as BalanceHistoryRow[]).reverse();
   }
 
+  /**
+   * Timestamp of the most recent full `market-scan` run — derived from the
+   * newest `signals` row (only `market-scan` writes to that table;
+   * `price-refresh` writes only `balance_history`/`transactions`). Lets the
+   * dashboard show a "data freshness" indicator, so a silently-stuck cron job
+   * is visible at a glance instead of just looking like a flat chart.
+   */
+  async getLastScanTime(): Promise<string | null> {
+    const { data, error } = await this.getClient()
+      .from('signals')
+      .select('scanned_at')
+      .order('scanned_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) {
+      throw error;
+    }
+    return (data as { scanned_at: string } | null)?.scanned_at ?? null;
+  }
+
   /** Latest signal per watched ticker, newest scan first per ticker. */
   async getWatchlistSignals(): Promise<SignalRow[]> {
     const { data, error } = await this.getClient()
@@ -112,6 +132,19 @@ export interface PositionRow {
   shares: number;
   entry_price: number;
   opened_at: string;
+  opening_transaction_id: number | null;
+}
+
+export interface SignalSnapshot {
+  hype_score: number;
+  z_score: number;
+  mention_count: number;
+  baseline_mentions: number;
+  sentiment_ratio: number | null;
+  price_trend_pct: number;
+  drop_from_high_pct: number;
+  verdict: string;
+  intraday_points: number;
 }
 
 export interface TransactionRow {
@@ -121,10 +154,15 @@ export interface TransactionRow {
   shares: number;
   price: number;
   fee: number;
+  fx_fee: number;
+  currency: string;
   gross_amount: number;
   realized_pnl: number | null;
   reason: string;
   created_at: string;
+  signal_snapshot: SignalSnapshot | null;
+  opening_transaction_id: number | null;
+  exit_reason: 'take-profit' | 'stop-loss' | 'interim-take-profit' | 'interim-stop-loss' | null;
 }
 
 export interface BalanceHistoryRow {
@@ -133,6 +171,7 @@ export interface BalanceHistoryRow {
   cash: number;
   positions_value: number;
   total_value: number;
+  spy_price: number | null;
 }
 
 export interface SignalRow {

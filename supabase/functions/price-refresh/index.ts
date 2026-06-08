@@ -24,11 +24,16 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 const TAKE_PROFIT = 0.04;
 const STOP_LOSS = -0.035;
 
+// Currency-conversion spread Swissquote charges on USD-denominated trades from
+// a CHF account — kept in sync with the same constant in `market-scan`.
+const FX_FEE_RATE = 0.0095;
+
 interface PositionRow {
   id: number;
   ticker: string;
   shares: number;
   entry_price: number;
+  opening_transaction_id: number | null;
 }
 
 interface PortfolioRow {
@@ -48,6 +53,14 @@ function swissquoteFee(amount: number): number {
   if (amount < 25000) return 80;
   if (amount < 50000) return 135;
   return 190;
+}
+
+function fxFee(amount: number): number {
+  return amount * FX_FEE_RATE;
+}
+
+async function fetchBenchmarkPrice(): Promise<number | null> {
+  return fetchLatestPrice('SPY');
 }
 
 // Same Yahoo Finance chart endpoint `market-scan` uses for daily history — but
@@ -113,9 +126,11 @@ Deno.serve(async () => {
       if (change >= TAKE_PROFIT || change <= STOP_LOSS) {
         const grossAmount = position.shares * price;
         const fee = swissquoteFee(grossAmount);
-        const proceeds = grossAmount - fee;
+        const fx = fxFee(grossAmount);
+        const proceeds = grossAmount - fee - fx;
         const costBasis = position.shares * position.entry_price;
         const realizedPnl = proceeds - costBasis;
+        const interim = change >= TAKE_PROFIT ? 'interim-take-profit' : 'interim-stop-loss';
 
         await supabase.from('transactions').insert({
           ticker: position.ticker,
@@ -123,8 +138,12 @@ Deno.serve(async () => {
           shares: position.shares,
           price,
           fee,
+          fx_fee: fx,
+          currency: 'USD',
           gross_amount: grossAmount,
           realized_pnl: realizedPnl,
+          opening_transaction_id: position.opening_transaction_id,
+          exit_reason: interim,
           reason:
             change >= TAKE_PROFIT
               ? `[Zwischen-Check] Take-Profit erreicht: +${(change * 100).toFixed(1)}% seit Einstieg.`
@@ -136,11 +155,11 @@ Deno.serve(async () => {
 
         portfolio.cash += proceeds;
         portfolio.realized_pnl += realizedPnl;
-        portfolio.total_fees += fee;
+        portfolio.total_fees += fee + fx;
         portfolio.trade_count += 1;
         log.push(
           `${position.ticker}: SELL ${position.shares} @ ${price} zwischen den vollen Scans ` +
-            `(PnL ${realizedPnl.toFixed(2)} CHF, Grund: ${change >= TAKE_PROFIT ? 'Take-Profit' : 'Stop-Loss'}).`,
+            `(PnL ${realizedPnl.toFixed(2)} CHF, Gebühren ${(fee + fx).toFixed(2)} CHF inkl. FX, Grund: ${change >= TAKE_PROFIT ? 'Take-Profit' : 'Stop-Loss'}).`,
         );
       } else {
         log.push(`${position.ticker}: ${(change * 100).toFixed(1)}% seit Einstieg, kein Exit-Trigger.`);
@@ -156,10 +175,12 @@ Deno.serve(async () => {
       (sum, p) => sum + p.shares * (latestPrices.get(p.ticker) ?? p.entry_price),
       0,
     );
+    const spyPrice = await fetchBenchmarkPrice();
     await supabase.from('balance_history').insert({
       cash: portfolio.cash,
       positions_value: positionsValue,
       total_value: portfolio.cash + positionsValue,
+      spy_price: spyPrice,
     });
     log.push(
       `Portfolio aktualisiert: Cash ${portfolio.cash.toFixed(2)} CHF, ` +
