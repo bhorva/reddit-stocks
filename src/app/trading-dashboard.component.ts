@@ -889,23 +889,46 @@ interface MissedOpportunityView {
         <div class="card">
           <h3>Analysen</h3>
 
-          <!-- Query selector -->
+          <!-- Query selector + action buttons -->
           <div class="analysis-controls">
             <select
               class="analysis-select"
               [value]="selectedAnalysisId()"
-              (change)="selectedAnalysisId.set($any($event.target).value)"
+              (change)="onAnalysisQueryChange($any($event.target).value)"
             >
               @for (q of ANALYSIS_QUERIES; track q.id) {
                 <option [value]="q.id">{{ q.label }}</option>
               }
             </select>
-            <button type="button" class="btn-sql" (click)="openSqlDialog()" title="Zeigt den SQL-Code, der diese Analyse in der Datenbank ausführen würde">
-              SQL anzeigen
+            <button
+              type="button"
+              class="btn-run"
+              [class.btn-run-loading]="analysisExecuting()"
+              [disabled]="analysisExecuting()"
+              (click)="executeSelectedAnalysis()"
+              title="Führt die Analyse gegen den kompletten Transaktions-Log in der Datenbank aus — nicht nur die letzten 50 gecachten Einträge."
+            >
+              @if (analysisExecuting()) {
+                <span class="btn-run-spinner"></span> Wird ausgeführt…
+              } @else {
+                ▶ Ausführen
+              }
+            </button>
+            <button type="button" class="btn-sql" (click)="openSqlDialog()" title="Zeigt den SQL-Code, der dieser Analyse entspricht">
+              SQL
             </button>
           </div>
 
           <p class="analysis-desc muted">{{ selectedQuery().description }}</p>
+
+          <!-- Data source indicator -->
+          <div class="analysis-source" [class.analysis-source-live]="analysisAllTxs() !== null">
+            @if (analysisAllTxs() !== null) {
+              ✓ Live-Daten · {{ analysisSourceLabel() }}
+            } @else {
+              ⏳ {{ analysisSourceLabel() }} · <em>„Ausführen"</em> für vollständige Ergebnisse
+            }
+          </div>
 
           <!-- Interpretation -->
           @if (analysisRows().length > 0) {
@@ -1502,11 +1525,44 @@ interface MissedOpportunityView {
         border: 1px solid #d0d0d0; border-radius: 6px;
         font-size: 0.82rem; background: #fff; cursor: pointer;
       }
+
+      /* ── "Ausführen" primary action button ── */
+      .btn-run {
+        display: inline-flex; align-items: center; gap: 0.4rem;
+        padding: 0.38rem 1rem;
+        background: #ff4500; color: #fff;
+        border: none; border-radius: 6px;
+        font-size: 0.8rem; font-weight: 600; cursor: pointer;
+        white-space: nowrap;
+        transition: background 0.15s, opacity 0.15s, transform 0.1s;
+        box-shadow: 0 1px 4px rgba(255,69,0,0.3);
+      }
+      .btn-run:hover:not(:disabled) { background: #e03d00; transform: translateY(-1px); box-shadow: 0 3px 8px rgba(255,69,0,0.35); }
+      .btn-run:active:not(:disabled) { transform: translateY(0); }
+      .btn-run:disabled { opacity: 0.65; cursor: not-allowed; }
+      .btn-run-spinner {
+        display: inline-block; width: 11px; height: 11px;
+        border: 2px solid rgba(255,255,255,0.4);
+        border-top-color: #fff;
+        border-radius: 50%;
+        animation: runSpinner 0.7s linear infinite;
+      }
+      @keyframes runSpinner { to { transform: rotate(360deg); } }
+
+      /* ── "SQL" secondary button (was btn-sql) ── */
       .btn-sql {
-        padding: 0.35rem 0.75rem; border: 1px solid #bbb; border-radius: 6px;
+        padding: 0.35rem 0.7rem; border: 1px solid #bbb; border-radius: 6px;
         font-size: 0.78rem; background: #f5f5f5; cursor: pointer; white-space: nowrap;
       }
       .btn-sql:hover { background: #e8e8e8; }
+
+      /* ── Data source pill ── */
+      .analysis-source {
+        margin-top: 0.45rem;
+        font-size: 0.72rem; color: #aaa;
+      }
+      .analysis-source em { font-style: normal; font-weight: 600; }
+      .analysis-source.analysis-source-live { color: #1a8a3c; font-weight: 500; }
       .analysis-desc { margin: 0.5rem 0 0; font-size: 0.8rem; }
       .analysis-insight {
         margin-top: 0.75rem; padding: 0.65rem 0.85rem;
@@ -2960,6 +3016,13 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   // computation is doing behind the scenes.
 
   protected readonly selectedAnalysisId = signal<string>('verdict');
+  // Reset executed results when the user picks a different query so the
+  // source-label and rows stay consistent (no stale "DB result from query X
+  // displayed under query Y" situation).
+  protected onAnalysisQueryChange(id: string): void {
+    this.selectedAnalysisId.set(id);
+    this.analysisAllTxs.set(null);
+  }
 
   // ── Query definitions ────────────────────────────────────────────────────
 
@@ -3443,15 +3506,46 @@ GROUP BY 1 ORDER BY 1 DESC;`,
     this.ANALYSIS_QUERIES.find((q) => q.id === this.selectedAnalysisId()) ?? this.ANALYSIS_QUERIES[0],
   );
 
+  // ── "Ausführen" — full-dataset analysis ─────────────────────────────────
+  // When null: results come from the already-loaded (cached, ≤50) transactions.
+  // When set: results come from the full transaction log fetched on-demand.
+  protected readonly analysisAllTxs = signal<TransactionRow[] | null>(null);
+  protected readonly analysisExecuting = signal(false);
+
+  /** Number of transactions the current result set is based on. */
+  protected readonly analysisSourceLabel = computed(() => {
+    const full = this.analysisAllTxs();
+    if (full !== null) return `${full.length} Transaktionen aus der Datenbank`;
+    return `${this.transactions().length} gecachte Transaktionen`;
+  });
+
   protected readonly analysisRows = computed((): Record<string, unknown>[] => {
     const query = this.selectedQuery();
-    return query ? query.compute(this.transactions() as TransactionRow[]) : [];
+    // Prefer the full DB set when "Ausführen" was clicked; fall back to cache.
+    const txs = this.analysisAllTxs() ?? this.transactions();
+    return query ? query.compute(txs as TransactionRow[]) : [];
   });
 
   protected readonly analysisInterpretation = computed(() => {
     const query = this.selectedQuery();
     return query ? query.interpret(this.analysisRows()) : { text: '', color: 'neutral' as const };
   });
+
+  /** Fetches ALL transactions from the DB and re-runs the selected analysis. */
+  protected async executeSelectedAnalysis(): Promise<void> {
+    if (this.analysisExecuting()) return;
+    this.analysisExecuting.set(true);
+    try {
+      // Load every transaction — no artificial limit — so aggregations match
+      // what the raw SQL would return against the full table.
+      const all = await this.trading.getTransactionLog(10_000);
+      this.analysisAllTxs.set(all);
+    } catch (e) {
+      this.error.set(this.toMessage(e));
+    } finally {
+      this.analysisExecuting.set(false);
+    }
+  }
 
   protected openSqlDialog(): void {
     this.sqlDialogEl?.nativeElement.showModal();
