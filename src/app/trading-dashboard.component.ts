@@ -100,11 +100,11 @@ interface MissedOpportunityView {
         <span
           class="scan-freshness muted"
           [class.scan-stale]="scanIsStale()"
-          [title]="'Der grosse Markt-Scan (Auswertung neuer Trends, Käufe) läuft alle ~6 Stunden automatisch im Hintergrund. Diese Anzeige zeigt, wann er zuletzt lief — wirkt sie deutlich älter, könnte der automatische Job hängengeblieben sein. (Eine separate, schlankere Funktion prüft offene Positionen alle 30 Minuten unabhängig davon.)'"
+          [title]="'Der Markt-Scan läuft 3× täglich an NYSE/NASDAQ-Handelstagen (Mo–Fr): 15:00, 17:00 und 19:00 UTC (≈ 11:00, 13:00 und 15:00 ET). Ausserhalb der Börsenzeiten und am Wochenende läuft er bewusst nicht — ein Kauf wäre beim echten Broker ohnehin nicht ausführbar. (Markt zu) im Label ist daher normal. Eine separate Funktion prüft offene Positionen alle ~30 Min. unabhängig davon.'"
         >
           @if (lastScanAt(); as t) {
             Letzter Scan: {{ t | date: 'dd.MM. HH:mm' }} ({{ scanAgeLabel() }})
-            @if (scanIsStale()) { · evtl. hängengeblieben? }
+            @if (scanIsStale()) { · läuft nicht — hängengeblieben? }
           } @else {
             Noch kein Scan gelaufen.
           }
@@ -1591,10 +1591,33 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     return this.buyByOpeningId().get(t.opening_transaction_id) ?? null;
   }
 
-  // How long after the expected 6-hourly cadence we start flagging the last
-  // scan as possibly stuck — generous enough to not false-positive on a
-  // slightly-delayed run, tight enough to actually catch a dead cron job.
-  private static readonly SCAN_STALE_AFTER_MS = 9 * 60 * 60 * 1000;
+  // The scan runs 3× per trading day (Mon–Fri) at 15:00, 17:00 and 19:00 UTC
+  // — all within NYSE/NASDAQ regular hours (09:30–16:00 ET). Outside those
+  // windows (evenings, nights, weekends) it is intentionally idle: `isUsMarketOpen`
+  // in the Edge Function refuses to buy/sell outside the session anyway, so
+  // scanning then would just produce noise-only logs. That means a "stale"
+  // warning only makes sense while the market IS open — a 20-hour gap from
+  // Friday evening to Monday morning is expected, not a stuck cron.
+  //
+  // Rule: show the warning only if the US market is currently open AND the
+  // last scan is more than 3 hours old (= a full scheduled run was missed
+  // during an active session).
+  private static isUsMarketOpenNow(): boolean {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York',
+      weekday: 'short',
+      hour: 'numeric',
+      minute: 'numeric',
+      hourCycle: 'h23',
+    }).formatToParts(new Date());
+    const get = (type: string) => parts.find((p) => p.type === type)?.value ?? '';
+    const weekday = get('weekday');
+    const minutesSinceMidnight = Number(get('hour')) * 60 + Number(get('minute'));
+    const isWeekday = weekday !== 'Sat' && weekday !== 'Sun';
+    return isWeekday && minutesSinceMidnight >= 9 * 60 + 30 && minutesSinceMidnight < 16 * 60;
+  }
+
+  private static readonly SCAN_STALE_DURING_SESSION_MS = 3 * 60 * 60 * 1000; // 3 h
 
   ngOnInit(): void {
     if (this.trading.configured) {
@@ -1722,16 +1745,22 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
 
   protected scanIsStale(): boolean {
     const age = this.scanAgeMs();
-    return age !== null && age > TradingDashboardComponent.SCAN_STALE_AFTER_MS;
+    if (age === null) return false;
+    // Only flag as stuck when the NYSE/NASDAQ session is currently open —
+    // a long gap outside trading hours is expected, not a problem.
+    if (!TradingDashboardComponent.isUsMarketOpenNow()) return false;
+    return age > TradingDashboardComponent.SCAN_STALE_DURING_SESSION_MS;
   }
 
   protected scanAgeLabel(): string {
     const age = this.scanAgeMs();
     if (age === null) return '';
     const hours = age / 36e5;
-    if (hours < 1) return `vor ${Math.max(1, Math.round(age / 60000))} Min.`;
-    if (hours < 48) return `vor ${hours.toFixed(1)} Std.`;
-    return `vor ${(hours / 24).toFixed(1)} Tagen`;
+    const marketOpen = TradingDashboardComponent.isUsMarketOpenNow();
+    const suffix = marketOpen ? '' : ' (Markt zu)';
+    if (hours < 1) return `vor ${Math.max(1, Math.round(age / 60000))} Min.${suffix}`;
+    if (hours < 48) return `vor ${hours.toFixed(1)} Std.${suffix}`;
+    return `vor ${(hours / 24).toFixed(1)} Tagen${suffix}`;
   }
 
   // ── Strategy performance metrics ─────────────────────────────────────────
