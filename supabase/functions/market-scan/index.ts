@@ -831,18 +831,33 @@ async function sendNtfy(
   tags: string[] = [],
 ): Promise<void> {
   try {
-    // Use header-based format with text/plain body — ntfy treats application/json
-    // bodies as file attachments rather than messages (confirmed in testing).
-    await fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
+    // ── HTTP headers are ByteStrings (Latin-1, codepoint ≤ 255) ──────────────
+    // Emoji (✅ 🛑 🔒 📈 …) are codepoints > 255, so passing them in the
+    // `X-Title` header makes Deno's fetch throw a TypeError *before the request
+    // is even sent* — which the catch below then silently swallows. That was
+    // THE reason phone pushes never arrived while the Notification Center
+    // (logged separately, after this call) still showed every entry. Strip any
+    // non-Latin-1 char from the title; the emoji still reaches the phone via
+    // `X-Tags` (ntfy renders tag shortcodes as an emoji prefix). The message
+    // BODY is unaffected — it's sent as a UTF-8 body, not a header, so emoji
+    // and umlauts there are fine.
+    const headerSafeTitle = title.replace(/[^\x00-\xFF]/gu, '').replace(/\s+/g, ' ').trim();
+    const res = await fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'text/plain',
-        'X-Title': title,
+        'X-Title': headerSafeTitle,
         'X-Priority': String(priority),
         ...(tags.length ? { 'X-Tags': tags.join(',') } : {}),
       },
       body: message,
     });
+    // A non-2xx response does NOT throw — check it explicitly so a future
+    // delivery failure (bad topic, rate limit, …) is visible in the logs
+    // instead of vanishing the way the emoji-header bug did.
+    if (!res.ok) {
+      console.warn(`ntfy push not delivered (HTTP ${res.status}): ${await res.text().catch(() => '')}`);
+    }
   } catch (err) {
     // Non-critical: a notification failure must never interrupt the trade run.
     console.warn(`ntfy notification failed (non-critical): ${err}`);

@@ -225,16 +225,26 @@ async function sendNtfy(
   tags: string[] = [],
 ): Promise<void> {
   try {
-    await fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
+    // HTTP headers are ByteStrings (Latin-1, ≤255) — emoji in `X-Title` make
+    // Deno's fetch throw before sending, which the catch then swallows (THE
+    // reason phone pushes never arrived while the Notification Center still
+    // logged them). Strip non-Latin-1 chars from the title; emoji still reach
+    // the phone via `X-Tags`. The UTF-8 body is unaffected. See the fuller
+    // comment on the identical helper in market-scan.
+    const headerSafeTitle = title.replace(/[^\x00-\xFF]/gu, '').replace(/\s+/g, ' ').trim();
+    const res = await fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'text/plain',
-        'X-Title': title,
+        'X-Title': headerSafeTitle,
         'X-Priority': String(priority),
         ...(tags.length ? { 'X-Tags': tags.join(',') } : {}),
       },
       body: message,
     });
+    if (!res.ok) {
+      console.warn(`ntfy push not delivered (HTTP ${res.status}): ${await res.text().catch(() => '')}`);
+    }
   } catch (err) {
     console.warn(`ntfy notification failed (non-critical): ${err}`);
   }
