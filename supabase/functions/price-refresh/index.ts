@@ -321,6 +321,16 @@ Deno.serve(async () => {
     if (portfolioError) throw portfolioError;
     const portfolio = portfolioRow as PortfolioRow;
 
+    // Snapshot the additive fields BEFORE mutation — the final write applies
+    // (final − initial) atomically via apply_portfolio_delta so a concurrent
+    // market-scan run can't clobber this run's sale proceeds (and vice versa).
+    // See trading_schema_v16_atomic_portfolio.sql. price-refresh never touches
+    // blocked_count/blocked_capital, so it passes null for those (leave as-is).
+    const initialCash = portfolio.cash;
+    const initialRealizedPnl = portfolio.realized_pnl;
+    const initialTotalFees = portfolio.total_fees;
+    const initialTradeCount = portfolio.trade_count;
+
     const { data: openPositions, error: positionsError } = await supabase
       .from('positions')
       .select('*');
@@ -452,10 +462,25 @@ Deno.serve(async () => {
       }
     }
 
-    await supabase
-      .from('portfolio')
-      .update({ ...portfolio, updated_at: new Date().toISOString() })
-      .eq('id', true);
+    // Atomic delta apply (v16) instead of a full-row overwrite — see
+    // trading_schema_v16_atomic_portfolio.sql. Passing null for the blocked_*
+    // params leaves those columns untouched (market-scan owns them).
+    const { error: portfolioRpcError } = await supabase.rpc('apply_portfolio_delta', {
+      d_cash: portfolio.cash - initialCash,
+      d_realized_pnl: portfolio.realized_pnl - initialRealizedPnl,
+      d_total_fees: portfolio.total_fees - initialTotalFees,
+      d_trade_count: portfolio.trade_count - initialTradeCount,
+      set_blocked_count: null,
+      set_blocked_capital: null,
+    });
+    if (portfolioRpcError) {
+      console.warn(`apply_portfolio_delta RPC failed, falling back to full overwrite: ${portfolioRpcError.message}`);
+      log.push('⚠️ Portfolio-RPC (v16) nicht verfügbar — Fallback auf Vollüberschreibung (Race möglich). Migration trading_schema_v16_atomic_portfolio.sql ausführen!');
+      await supabase
+        .from('portfolio')
+        .update({ ...portfolio, updated_at: new Date().toISOString() })
+        .eq('id', true);
+    }
 
     // USD-denominated mark-to-market value, converted to CHF via the same
     // live rate used for every other conversion this run (see `market-scan`'s

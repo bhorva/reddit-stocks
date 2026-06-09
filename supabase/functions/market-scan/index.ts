@@ -1135,6 +1135,17 @@ Deno.serve(async () => {
     if (portfolioError) throw portfolioError;
     const portfolio = portfolioRow as PortfolioRow;
 
+    // Snapshot the ADDITIVE fields as read, BEFORE any mutation — the final
+    // write applies (final − initial) as an atomic DB-side delta (see the
+    // apply_portfolio_delta call at the end of the run) so a concurrent
+    // price-refresh run can't clobber our changes and vice versa. The
+    // in-memory `portfolio` keeps being mutated as before, so budget sizing
+    // mid-run still sees a consistent "initial + my changes so far" view.
+    const initialCash = portfolio.cash;
+    const initialRealizedPnl = portfolio.realized_pnl;
+    const initialTotalFees = portfolio.total_fees;
+    const initialTradeCount = portfolio.trade_count;
+
     // `blocked_count`/`blocked_capital` describe THIS run's "how much did we
     // choose not to risk just now" — not a lifetime total. Resetting them
     // here (rather than letting them accumulate across every 6-hourly run
@@ -1866,10 +1877,31 @@ Deno.serve(async () => {
     }
 
     // ── Persist portfolio + balance snapshot ──────────────────────────
-    await supabase
-      .from('portfolio')
-      .update({ ...portfolio, updated_at: new Date().toISOString() })
-      .eq('id', true);
+    // Atomic delta apply (v16) instead of a full-row overwrite — see
+    // trading_schema_v16_atomic_portfolio.sql for why the old
+    // `update({ ...portfolio })` lost a concurrent price-refresh run's sale
+    // proceeds. We pass how much THIS run changed (final − initial); the DB
+    // increments the live values so the two functions compose instead of
+    // clobbering. blocked_count/blocked_capital are this run's absolute
+    // values (price-refresh never touches them) → SET, not incremented.
+    const { error: portfolioRpcError } = await supabase.rpc('apply_portfolio_delta', {
+      d_cash: portfolio.cash - initialCash,
+      d_realized_pnl: portfolio.realized_pnl - initialRealizedPnl,
+      d_total_fees: portfolio.total_fees - initialTotalFees,
+      d_trade_count: portfolio.trade_count - initialTradeCount,
+      set_blocked_count: portfolio.blocked_count,
+      set_blocked_capital: portfolio.blocked_capital,
+    });
+    if (portfolioRpcError) {
+      // Fallback so a not-yet-applied v16 migration never breaks a trade run —
+      // but log loudly, because this path reintroduces the clobber race.
+      console.warn(`apply_portfolio_delta RPC failed, falling back to full overwrite: ${portfolioRpcError.message}`);
+      log.push('⚠️ Portfolio-RPC (v16) nicht verfügbar — Fallback auf Vollüberschreibung (Race möglich). Migration trading_schema_v16_atomic_portfolio.sql ausführen!');
+      await supabase
+        .from('portfolio')
+        .update({ ...portfolio, updated_at: new Date().toISOString() })
+        .eq('id', true);
+    }
 
     // Mark-to-market value of open positions, in CHF — `shares`/`price` are
     // USD-denominated, so the live `usdChfRate` (fetched once, up top)
