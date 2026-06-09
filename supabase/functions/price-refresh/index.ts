@@ -34,11 +34,24 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 // near-fixed brokerage tax to a small fraction of the targeted move:
 //   round-trip tax ≈ 4.4%  (≈30 CHF commission + ~0.95% FX margin, EACH WAY,
 //                           on a ~24%-of-portfolio / ~2'400 CHF position)
-//   net win  ≈ 0.20 - 0.044 ≈ +15.6%   net loss ≈ -0.06 - 0.044 ≈ -10.4%
-//   → breakeven hit rate ≈ 40%, a comfortably realistic bar for a heuristic
+//   net win  ≈ 0.20 - 0.044 ≈ +15.6%   net loss ≈ -0.08 - 0.044 ≈ -12.4%
+//   → breakeven hit rate ≈ 44%, a comfortably realistic bar for a heuristic
 //     with a genuine, if modest, edge.
+//
+// ── Division of labour with market-scan's intelligent sell/hold gate ───────
+// market-scan now SUPPRESSES the trailing stop while a position is still
+// "buy-eligible" (organic + in the dip range) — it HOLDS instead of churning
+// out a position it would immediately re-open (see the two-level exit design
+// in market-scan). That decision needs the `verdict` classification, which
+// THIS function deliberately never computes (it only re-prices). So
+// price-refresh enforces ONLY the two UNCONDITIONAL, verdict-independent
+// exits — take-profit (+20%) and the -8% hard stop from entry — and leaves
+// the verdict-aware trailing stop entirely to market-scan's 6-hourly run.
+// (A swing target that peaks and slides gets its profit locked at the next
+// market-scan; between scans the -8% floor still caps capital risk here.)
 const TAKE_PROFIT = 0.2;
-const STOP_LOSS = -0.06;
+const STOP_LOSS = -0.06; // trailing-stop distance — used only for the running-high display below
+const HARD_STOP = -0.08; // unconditional capital floor, % loss from entry
 
 // Currency-conversion spread Swissquote charges on USD-denominated trades from
 // a CHF account — kept in sync with the same constant in `market-scan`.
@@ -319,7 +332,10 @@ Deno.serve(async () => {
       }
       latestPrices.set(position.ticker, price);
 
-      // ── Trailing stop: update running high, then check exit ──────────────
+      // Keep the running high current for market-scan's trailing-stop logic and
+      // for the display line below — but this function never ACTS on it (see
+      // the division-of-labour comment at HARD_STOP: the trailing stop is
+      // verdict-aware and belongs to market-scan).
       const newHigh = Math.max(position.high_since_entry, price);
       if (newHigh > position.high_since_entry) {
         await supabase.from('positions').update({ high_since_entry: newHigh }).eq('id', position.id);
@@ -327,8 +343,12 @@ Deno.serve(async () => {
       }
 
       const changePct = (price - position.entry_price) / position.entry_price;
-      const trailingStopPrice = newHigh * (1 + STOP_LOSS); // e.g. newHigh × 0.94
-      const exitTriggered = changePct >= TAKE_PROFIT || price <= trailingStopPrice;
+      const trailingStopPrice = newHigh * (1 + STOP_LOSS); // shown only, not acted on here
+
+      // ── Unconditional exits only (take-profit + hard stop) ───────────────
+      const hitTakeProfit = changePct >= TAKE_PROFIT; // +20% from entry
+      const hitHardStop = changePct <= HARD_STOP; // -8% from entry — capital floor
+      const exitTriggered = hitTakeProfit || hitHardStop;
 
       if (exitTriggered) {
         // `grossAmount` must be the CHF-converted figure (what actually lands
@@ -344,8 +364,8 @@ Deno.serve(async () => {
         const costBasisUsd = position.shares * position.entry_price;
         const costBasis = costBasisUsd * entryFxRate;
         const realizedPnl = proceeds - costBasis - openingCosts.fee - openingCosts.fxFee;
-        const exitReason: 'interim-take-profit' | 'interim-trailing-stop' =
-          changePct >= TAKE_PROFIT ? 'interim-take-profit' : 'interim-trailing-stop';
+        const exitReason: 'interim-take-profit' | 'interim-hard-stop' =
+          hitTakeProfit ? 'interim-take-profit' : 'interim-hard-stop';
 
         // ── Race-condition guard ───────────────────────────────────────────
         // DELETE first (atomic), then INSERT the transaction. If market-scan
@@ -379,10 +399,10 @@ Deno.serve(async () => {
           // v14: record highest price reached for post-hoc trailing-stop analysis
           high_since_entry: newHigh,
           reason:
-            changePct >= TAKE_PROFIT
+            hitTakeProfit
               ? `[Zwischen-Check] Take-Profit erreicht: +${(changePct * 100).toFixed(1)}% seit Einstieg.`
-              : `[Zwischen-Check] Trailing-Stop ausgelöst: Kurs ${price.toFixed(2)} USD ≤ Stopkurs ${trailingStopPrice.toFixed(2)} USD ` +
-                `(${Math.abs(STOP_LOSS * 100)}% unter Hoch ${newHigh.toFixed(2)} USD; Einstieg ${position.entry_price.toFixed(2)} USD).`,
+              : `[Zwischen-Check] Hard-Stop ausgelöst: ${(changePct * 100).toFixed(1)}% seit Einstieg ` +
+                `(unbedingter Kapitalboden bei ${(HARD_STOP * 100).toFixed(0)}%; Einstieg ${position.entry_price.toFixed(2)} USD, Kurs ${price.toFixed(2)} USD).`,
         });
         positions.splice(positions.indexOf(position), 1);
         latestPrices.delete(position.ticker);
@@ -397,26 +417,28 @@ Deno.serve(async () => {
         );
         if (ntfyTopic) {
           const isTp = exitReason === 'interim-take-profit';
-          const ntfyTitle = isTp ? `✅ Take-Profit: ${position.ticker}` : `🔒 Trailing-Stop: ${position.ticker}`;
+          const ntfyTitle = isTp ? `✅ Take-Profit: ${position.ticker}` : `🛑 Hard-Stop: ${position.ticker}`;
           const ntfyMsg =
             `${position.shares.toFixed(2)} Stk. @ ${price.toFixed(2)} USD [Zwischen-Check]\n` +
             `PnL: ${realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(2)} CHF` +
-            (!isTp ? `\nHöchstpreis war: ${newHigh.toFixed(2)} USD` : '');
+            (!isTp ? `\n${(changePct * 100).toFixed(1)}% seit Einstieg (Kapitalboden ${(HARD_STOP * 100).toFixed(0)}%)` : '');
           const ntfyTags = isTp
             ? ['white_check_mark', 'money_with_wings']
-            : ['lock', realizedPnl >= 0 ? 'white_check_mark' : 'x'];
-          await sendNtfy(ntfyTopic, ntfyTitle, ntfyMsg, isTp ? 4 : 3, ntfyTags);
+            : ['octagonal_sign', 'x'];
+          await sendNtfy(ntfyTopic, ntfyTitle, ntfyMsg, 4, ntfyTags);
           await logNotification(
-            supabase, ntfyTitle, ntfyMsg, ntfyTopic, isTp ? 4 : 3, ntfyTags,
-            isTp ? 'sell-interim-tp' : 'sell-interim-trailing-stop',
+            supabase, ntfyTitle, ntfyMsg, ntfyTopic, 4, ntfyTags,
+            isTp ? 'sell-interim-tp' : 'sell-interim-hard-stop',
             position.ticker,
           );
         }
       } else {
+        // Informational only: market-scan (not this function) acts on the
+        // trailing stop, so show where it sits without implying we'd fire it.
         const trailingInfo = newHigh > position.entry_price
-          ? `, Trailing-Stop bei ${trailingStopPrice.toFixed(2)} USD (Hoch: ${newHigh.toFixed(2)})`
+          ? `, Trailing-Stop (von market-scan) bei ${trailingStopPrice.toFixed(2)} USD (Hoch: ${newHigh.toFixed(2)})`
           : '';
-        log.push(`${position.ticker}: ${(changePct * 100).toFixed(1)}% seit Einstieg${trailingInfo}, kein Exit-Trigger.`);
+        log.push(`${position.ticker}: ${(changePct * 100).toFixed(1)}% seit Einstieg${trailingInfo}, kein unbedingter Exit-Trigger.`);
       }
     }
 

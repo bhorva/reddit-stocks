@@ -466,8 +466,10 @@ export interface PushNotificationRow {
     | 'buy'
     | 'sell-tp'
     | 'sell-trailing-stop'
+    | 'sell-hard-stop'
     | 'sell-interim-tp'
     | 'sell-interim-trailing-stop'
+    | 'sell-interim-hard-stop'
     | null;
   ticker: string | null;
   created_at: string;

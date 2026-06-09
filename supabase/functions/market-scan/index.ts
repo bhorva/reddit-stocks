@@ -93,26 +93,40 @@ const POSITION_SIZE = 0.24; // fraction of total portfolio value per buy — rai
 // hour."
 const DIP_THRESH = -0.04; // buy once price has dropped this much from its recent (multi-week) high
 
-// TAKE_PROFIT / STOP_LOSS sized for SWING trades. The round-trip tax (≈30 CHF
-// Swissquote commission + ~0.95% FX margin EACH WAY on a ~24%-of-portfolio
-// position, ≈2'400 CHF — see the POSITION_SIZE comment for why it's sized
-// this way now) hits every exit, win or lose — so what matters isn't "does
-// the winning side clear it" but how it reshapes BOTH sides:
+// ── Two-level exit design (intelligent sell/hold) ─────────────────────────
+// An open position has THREE exit triggers, not the old single stop:
 //
+//   1. TAKE_PROFIT (+20% from entry)   — unconditional, lock the win.
+//   2. HARD_STOP   (-8% from entry)    — unconditional capital floor. This is
+//      the ONLY true risk limit; it always fires regardless of verdict.
+//   3. Trailing stop (price ≤ peak × (1+STOP_LOSS), i.e. -6% below the highest
+//      price seen since entry) — but SUPPRESSED while the position is still
+//      "buy-eligible" (organic + in our dip range). Rationale: it makes no
+//      sense to sell on a trailing stop only to have the buy-check re-open the
+//      exact same dip on the next scan, paying a double round-trip fee. So the
+//      trailing stop only sells when momentum broke AND we would NOT re-buy —
+//      i.e. near the highs (no longer a dip → lock profit) or once the thesis
+//      flips away from `organic` (then the next trailing trigger exits the
+//      broken thesis). See the sell-check below for the `wouldBuyNow` gate.
+//      This is why the post-sell cooldown is no longer needed: the churn path
+//      (sell-then-immediately-rebuy) can't occur — we HOLD instead of selling.
+//
+// Fee math (unchanged round-trip tax, worst-case loss now the -8% HARD_STOP):
 //   one-way cost ≈ 30/2400 + 0.0095   ≈ 1.25% + 0.95%  ≈  2.2%
 //   round-trip   ≈ 2 × one-way cost                    ≈  4.4%
 //   net win  ≈ TAKE_PROFIT - 0.044  =  0.20 - 0.044  ≈ +15.6%
-//   net loss ≈ STOP_LOSS   - 0.044  = -0.06 - 0.044  ≈ -10.4%
-//   breakeven hit rate = |net loss| / (net win + |net loss|) ≈ 40%
+//   net loss ≈ HARD_STOP   - 0.044  = -0.08 - 0.044  ≈ -12.4%
+//   breakeven hit rate = |net loss| / (net win + |net loss|) ≈ 44%
 //
-// ~40% is a comfortably realistic bar for a heuristic with a genuine, if
-// modest, edge to clear — an improvement on the already-reasonable ~47% the
-// previous (smaller-position) sizing implied, and a long way from the ~85%
-// the original ±8%/±3.5% pair would have demanded. The two net outcomes stay
-// close to symmetric too, so profitability isn't hostage to an unrealistically
-// lopsided hit rate in either direction.
-const TAKE_PROFIT = 0.20; // sell once a position gains this much
-const STOP_LOSS = -0.06; // sell once a position loses this much
+// ~44% is still a realistic bar for a heuristic with a genuine edge. The
+// wider -8% floor (vs the old -6%) is a deliberate trade: it buys patience so
+// an organic dip isn't churned out on noise, while each avoided churn saves a
+// full ~4.4% round trip — comfortably more than the extra 2% of drawdown the
+// wider floor risks. The trailing stop (level 3) still protects profit near
+// the highs, where suppression doesn't apply (no longer a dip to re-buy).
+const TAKE_PROFIT = 0.20; // unconditional take-profit, % gain from entry
+const STOP_LOSS = -0.06; // trailing-stop DISTANCE below the since-entry peak (level 3)
+const HARD_STOP = -0.08; // unconditional capital floor, % loss from entry (level 2)
 
 // Trimmed from 5 to 3 alongside the POSITION_SIZE increase (0.12 → 0.24) —
 // see the comment there: fewer, larger slots in exchange for each trade's
@@ -136,14 +150,6 @@ const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 // a genuine trend, not a one-scan noise spike.
 const NEAR_DIP_BUFFER = 0.01;            // 1 pp above DIP_THRESH qualifies — but only with streak confirmation
 const CONSECUTIVE_ORGANIC_THRESHOLD = 2; // min consecutive prior organic scans required for a near-miss buy
-
-// After any sell (take-profit OR stop-loss), the engine won't re-enter the
-// same ticker for this many milliseconds. Prevents immediately buying back a
-// position that was just stopped out — a classic "fighting the tape" pattern
-// that ignores the trend signal the stop itself provided.
-// 4 hours ≈ 2–3 scan slots: sold at 14:30 → blocked at 15:00 + 17:00 →
-// eligible again at 19:00. Long enough to see if the selling pressure abates.
-const SELL_COOLDOWN_MS = 4 * 60 * 60 * 1000;
 
 // Currency-conversion spread Swissquote charges when trading USD-denominated
 // stocks from a CHF-denominated account (in addition to the brokerage
@@ -1500,7 +1506,45 @@ Deno.serve(async () => {
 
         const changePct = (price - position.entry_price) / position.entry_price;
         const trailingStopPrice = newHigh * (1 + STOP_LOSS); // e.g. newHigh × 0.94
-        const exitTriggered = changePct >= TAKE_PROFIT || price <= trailingStopPrice;
+
+        // ── Intelligent exit gate (see the two-level design at HARD_STOP) ────
+        // `wouldBuyNow` reuses the exact buy-eligibility predicate (verdict +
+        // dip + not-ETF) MINUS the `!position` check — i.e. "would the engine
+        // re-open this position at the current price?". It is deliberately a
+        // touch more lenient than the buy-check (no consecutive-organic
+        // confirmation for near-misses): entering on a one-scan fluke is
+        // expensive, but HOLDING one extra scan costs nothing, so the bar to
+        // keep a position is lower than the bar to open one.
+        const wouldBuyNow =
+          verdict === 'organic' &&
+          instrumentInfoByTicker.get(ticker)?.isEtf !== true &&
+          (isFullDip || isNearMiss);
+
+        const hitTakeProfit = changePct >= TAKE_PROFIT; // +20% — unconditional
+        const hitHardStop = changePct <= HARD_STOP; // -8% from entry — unconditional
+        const hitTrailing = price <= trailingStopPrice; // -6% below since-entry peak
+        // The trailing stop only sells if we would NOT re-buy here — otherwise
+        // we'd churn (sell then re-open the same dip, double round-trip fee).
+        const exitTriggered = hitTakeProfit || hitHardStop || (hitTrailing && !wouldBuyNow);
+
+        const exitReason: 'take-profit' | 'hard-stop' | 'trailing-stop' = hitTakeProfit
+          ? 'take-profit'
+          : hitHardStop
+            ? 'hard-stop'
+            : 'trailing-stop';
+
+        // Momentum broke, but the entry thesis is intact (organic + still in
+        // our dip range) and we're above the hard floor → HOLD instead of
+        // selling. Logged so the run history explains why a triggered trailing
+        // stop did NOT exit. (This is what makes the post-sell cooldown
+        // obsolete: the sell-then-rebuy churn path no longer exists.)
+        if (hitTrailing && wouldBuyNow && !hitTakeProfit && !hitHardStop) {
+          log.push(
+            `${ticker}: Trailing-Stop erreicht (${price.toFixed(2)} ≤ ${trailingStopPrice.toFixed(2)} USD), ` +
+              `aber These intakt (organic, Dip ${(dropFromHigh * 100).toFixed(1)}% unter Mehrwochenhoch, ` +
+              `${(changePct * 100).toFixed(1)}% seit Einstieg) — HALTEN statt verkaufen, kein Churn.`,
+          );
+        }
 
         if (exitTriggered && !marketOpen) {
           // The exit condition fired, but a real account couldn't place the
@@ -1509,9 +1553,11 @@ Deno.serve(async () => {
           // (which also respects market hours, see there) or the next
           // in-hours `market-scan` run will catch it the moment trading
           // resumes — same as a real standing order would.
-          const exitDesc = changePct >= TAKE_PROFIT
+          const exitDesc = hitTakeProfit
             ? `Take-Profit: +${(changePct * 100).toFixed(1)}% seit Einstieg`
-            : `Trailing-Stop: ${price.toFixed(2)} USD ≤ Stopkurs ${trailingStopPrice.toFixed(2)} USD (${Math.abs(STOP_LOSS * 100)}% unter Hoch ${newHigh.toFixed(2)} USD)`;
+            : hitHardStop
+              ? `Hard-Stop: ${(changePct * 100).toFixed(1)}% seit Einstieg (Boden ${(HARD_STOP * 100).toFixed(0)}%)`
+              : `Trailing-Stop: ${price.toFixed(2)} USD ≤ Stopkurs ${trailingStopPrice.toFixed(2)} USD (${Math.abs(STOP_LOSS * 100)}% unter Hoch ${newHigh.toFixed(2)} USD)`;
           log.push(
             `${ticker}: Exit-Schwelle erreicht (${exitDesc}), aber US-Börsen sind geschlossen — ` +
               `Order wird beim nächsten Lauf innerhalb der Handelszeiten ausgeführt.`,
@@ -1542,8 +1588,8 @@ Deno.serve(async () => {
           const costBasisUsd = position.shares * position.entry_price;
           const costBasis = costBasisUsd * entryFxRate;
           const realizedPnl = proceeds - costBasis - openingCosts.fee - openingCosts.fxFee;
-          const exitReason: 'take-profit' | 'trailing-stop' =
-            changePct >= TAKE_PROFIT ? 'take-profit' : 'trailing-stop';
+          // `exitReason` is computed once, above the market-hours branch — it
+          // drives both this sell and the closed-market log line.
 
           // ── Race-condition guard ─────────────────────────────────────────
           // DELETE first (atomic DB operation), then INSERT the transaction.
@@ -1579,8 +1625,12 @@ Deno.serve(async () => {
             reason:
               exitReason === 'take-profit'
                 ? `Take-Profit erreicht: +${(changePct * 100).toFixed(1)}% seit Einstieg.`
-                : `Trailing-Stop ausgelöst: Kurs ${price.toFixed(2)} USD gefallen auf ≤ ${trailingStopPrice.toFixed(2)} USD ` +
-                  `(${Math.abs(STOP_LOSS * 100)}% unter Hoch von ${newHigh.toFixed(2)} USD; Einstieg ${position.entry_price.toFixed(2)} USD).`,
+                : exitReason === 'hard-stop'
+                  ? `Hard-Stop ausgelöst: ${(changePct * 100).toFixed(1)}% seit Einstieg ` +
+                    `(unbedingter Kapitalboden bei ${(HARD_STOP * 100).toFixed(0)}%; Einstieg ${position.entry_price.toFixed(2)} USD, Kurs ${price.toFixed(2)} USD).`
+                  : `Trailing-Stop ausgelöst: Kurs ${price.toFixed(2)} USD gefallen auf ≤ ${trailingStopPrice.toFixed(2)} USD ` +
+                    `(${Math.abs(STOP_LOSS * 100)}% unter Hoch von ${newHigh.toFixed(2)} USD; Einstieg ${position.entry_price.toFixed(2)} USD; ` +
+                    `These nicht mehr kaufwürdig).`,
           });
           positions.splice(positions.indexOf(position), 1);
 
@@ -1591,24 +1641,31 @@ Deno.serve(async () => {
           log.push(`${ticker}: SELL ${position.shares} @ ${price} (PnL ${realizedPnl.toFixed(2)} CHF, Gebühren ${(fee + fx).toFixed(2)} CHF inkl. FX, Grund: ${exitReason})`);
           if (ntfyTopic) {
             const isTp = exitReason === 'take-profit';
-            const ntfyTitle = isTp ? `✅ Take-Profit: ${ticker}` : `🔒 Trailing-Stop: ${ticker}`;
+            const isHardStop = exitReason === 'hard-stop';
+            const ntfyTitle = isTp
+              ? `✅ Take-Profit: ${ticker}`
+              : isHardStop
+                ? `🛑 Hard-Stop: ${ticker}`
+                : `🔒 Trailing-Stop: ${ticker}`;
             const ntfyMsg =
               `${position.shares.toFixed(2)} Stk. @ ${price.toFixed(2)} USD\n` +
               `PnL: ${realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(2)} CHF` +
-              (!isTp ? `\nHöchstpreis war: ${newHigh.toFixed(2)} USD` : '');
-            await sendNtfy(
-              ntfyTopic,
-              ntfyTitle,
-              ntfyMsg,
-              isTp ? 4 : 3,
-              isTp ? ['white_check_mark', 'money_with_wings'] : ['lock', realizedPnl >= 0 ? 'white_check_mark' : 'x'],
-            );
+              (isHardStop
+                ? `\n${(changePct * 100).toFixed(1)}% seit Einstieg (Kapitalboden ${(HARD_STOP * 100).toFixed(0)}%)`
+                : !isTp
+                  ? `\nHöchstpreis war: ${newHigh.toFixed(2)} USD`
+                  : '');
+            const ntfyTags = isTp
+              ? ['white_check_mark', 'money_with_wings']
+              : isHardStop
+                ? ['octagonal_sign', 'x']
+                : ['lock', realizedPnl >= 0 ? 'white_check_mark' : 'x'];
+            const ntfyPriority = isTp ? 4 : isHardStop ? 4 : 3;
+            const eventType = isTp ? 'sell-tp' : isHardStop ? 'sell-hard-stop' : 'sell-trailing-stop';
+            await sendNtfy(ntfyTopic, ntfyTitle, ntfyMsg, ntfyPriority as 1 | 2 | 3 | 4 | 5, ntfyTags);
             await logNotification(
               supabase, ntfyTitle, ntfyMsg, ntfyTopic,
-              isTp ? 4 : 3,
-              isTp ? ['white_check_mark', 'money_with_wings'] : ['lock', realizedPnl >= 0 ? 'white_check_mark' : 'x'],
-              isTp ? 'sell-tp' : 'sell-trailing-stop',
-              ticker,
+              ntfyPriority, ntfyTags, eventType, ticker,
             );
           }
           continue;
@@ -1658,25 +1715,13 @@ Deno.serve(async () => {
         // (`recentHigh`/`dropFromHigh` are now hoisted above, alongside
         // `position` — see the comment there for why both moved up.)
         if (isFullDip || isNearMiss) {
-          // ── Sell-cooldown check ──────────────────────────────────────────
-          // Don't re-enter a ticker that was sold within the last 4 hours.
-          // A stop-loss (or take-profit that reversed) signals the trend is
-          // against us — buying back immediately is "fighting the tape."
-          const cooldownSince = new Date(Date.now() - SELL_COOLDOWN_MS).toISOString();
-          const { data: recentSell } = await supabase
-            .from('transactions')
-            .select('created_at, exit_reason')
-            .eq('ticker', ticker)
-            .eq('action', 'sell')
-            .gte('created_at', cooldownSince)
-            .limit(1);
-          if (recentSell && recentSell.length > 0) {
-            log.push(
-              `${ticker}: Cooldown aktiv (letzte Transaktion: ${recentSell[0].exit_reason ?? 'sell'} ` +
-              `um ${new Date(recentSell[0].created_at).toISOString()}) — kein Wiedereinstieg für ${SELL_COOLDOWN_MS / 36e5}h.`
-            );
-            continue;
-          }
+          // No post-sell cooldown here anymore: the intelligent sell/hold gate
+          // above (see the two-level exit design at HARD_STOP) HOLDS a position
+          // whenever the buy-check would re-open it, so the sell-then-rebuy
+          // churn path the cooldown used to guard simply can't occur. The only
+          // sell that can be followed by a fresh entry is a -8% HARD_STOP, and
+          // that re-entry — 6h+ later, at a lower price, with a re-confirmed
+          // organic thesis — is a deliberate new trade, not churn.
 
           // ── Measure 1 + 3: near-miss only buys with confirmed trend ─────
           // Full dip → always buy (full size).

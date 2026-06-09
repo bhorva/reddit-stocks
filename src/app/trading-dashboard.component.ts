@@ -571,7 +571,7 @@ interface MissedOpportunityView {
                   </div>
                   @if (positionView(p).changePct !== null) {
                     <div class="exit-bar-wrap"
-                         [title]="'Trailing Stop aktuell bei ' + (positionView(p).trailingStopPrice | number: '1.2-2') + ' USD (' + (positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1') + '% ab Einstieg). Take-Profit +' + (takeProfit * 100) + '% ab Einstieg.'">
+                         [title]="'Take-Profit +' + (takeProfit * 100) + '% ab Einstieg · Hard-Stop ' + (hardStop * 100) + '% ab Einstieg (unbedingter Kapitalboden). Trailing Stop bei ' + (positionView(p).trailingStopPrice | number: '1.2-2') + ' USD (' + (positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1') + '% ab Einstieg) — greift nur, wenn die Position nicht mehr kaufwürdig ist (organic + im Dip), sonst wird gehalten statt verkauft.'">
                       <div class="exit-bar-bg">
                         <!-- Zero line: dynamically positioned via exitBarPosition so it
                              tracks the "break-even" point correctly as the trailing stop
@@ -1917,6 +1917,8 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       case 'sell-interim-tp':           return 'notif-item notif-type-interim-tp';
       case 'sell-trailing-stop':        return 'notif-item notif-type-stop';
       case 'sell-interim-trailing-stop':return 'notif-item notif-type-interim-stop';
+      case 'sell-hard-stop':            return 'notif-item notif-type-stop';
+      case 'sell-interim-hard-stop':    return 'notif-item notif-type-interim-stop';
       default:                          return 'notif-item';
     }
   }
@@ -1928,6 +1930,8 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       case 'sell-interim-tp':            return '🎯';
       case 'sell-trailing-stop':
       case 'sell-interim-trailing-stop': return '🔒';
+      case 'sell-hard-stop':
+      case 'sell-interim-hard-stop':     return '🛑';
       default:                           return '🔔';
     }
   }
@@ -1955,7 +1959,8 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   // the targeted move: net win ≈ +13.7%, net loss ≈ -12.3%, breakeven hit
   // rate ≈ 47%, a realistic bar for a heuristic with a genuine edge.
   protected readonly takeProfit = 0.2;
-  protected readonly stopLoss = -0.06;
+  protected readonly stopLoss = -0.06; // trailing-stop distance below the since-entry peak (STOP_LOSS)
+  protected readonly hardStop = -0.08; // unconditional capital floor, % loss from entry (HARD_STOP)
   protected readonly maxPositions = 3; // kept in sync with MAX_POSITIONS in market-scan/index.ts
 
   @ViewChild('chartCanvas') private chartCanvas?: ElementRef<HTMLCanvasElement>;
@@ -3243,12 +3248,13 @@ GROUP BY 1 ORDER BY total_pnl_chf DESC;`,
     },
     {
       id: 'exits',
-      label: 'Exit-Arten: Trailing Stop vs. Take-Profit',
-      description: 'Wie oft löste welcher Exit-Mechanismus aus — und was hat er durchschnittlich eingebracht? Vergleich Trailing Stop (v14+) mit fixem Stop-Loss (legacy) und Take-Profit.',
+      label: 'Exit-Arten: Trailing Stop vs. Hard-Stop vs. Take-Profit',
+      description: 'Wie oft löste welcher Exit-Mechanismus aus — und was hat er durchschnittlich eingebracht? Take-Profit (+20%), Hard-Stop (−8% Kapitalboden, v15+), verdict-bewusster Trailing Stop (v14+) und fixer Stop-Loss (legacy).',
       sql: `-- Exit-Arten Analyse
 SELECT
   CASE
     WHEN exit_reason IN ('take-profit','interim-take-profit')   THEN 'Take-Profit'
+    WHEN exit_reason IN ('hard-stop','interim-hard-stop')        THEN 'Hard-Stop (v15+)'
     WHEN exit_reason IN ('trailing-stop','interim-trailing-stop') THEN 'Trailing Stop (v14+)'
     WHEN exit_reason IN ('stop-loss','interim-stop-loss')        THEN 'Stop-Loss (fix, pre-v14)'
     ELSE 'Sonstige'
@@ -3277,6 +3283,7 @@ GROUP BY 1 ORDER BY exits DESC;`,
         const label = (r: string | null): string => {
           if (!r) return 'Sonstige';
           if (r.includes('take-profit')) return 'Take-Profit';
+          if (r.includes('hard-stop')) return 'Hard-Stop (v15+)';
           if (r.includes('trailing-stop')) return 'Trailing Stop (v14+)';
           if (r.includes('stop-loss')) return 'Stop-Loss (fix, pre-v14)';
           return 'Sonstige';
@@ -3290,7 +3297,7 @@ GROUP BY 1 ORDER BY exits DESC;`,
             g.dropsFromHigh.push(((s.high_since_entry - s.price) / s.high_since_entry) * 100);
           }
         }
-        return ['Take-Profit', 'Trailing Stop (v14+)', 'Stop-Loss (fix, pre-v14)', 'Sonstige']
+        return ['Take-Profit', 'Hard-Stop (v15+)', 'Trailing Stop (v14+)', 'Stop-Loss (fix, pre-v14)', 'Sonstige']
           .map((k) => {
             const g = groups.get(k);
             if (!g) return null;
