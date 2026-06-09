@@ -323,10 +323,25 @@ interface MissedOpportunityView {
                 {{ chartMode() === 'value' ? 'In % seit Start anzeigen' : 'In CHF anzeigen' }}
               </button>
             </h3>
+            <!-- Time-range selector -->
+            <div class="chart-range-bar">
+              @for (r of chartRanges; track r.value) {
+                <button
+                  type="button"
+                  class="chart-range-btn"
+                  [class.active]="chartRange() === r.value"
+                  (click)="setChartRange(r.value)"
+                  [title]="r.title"
+                >{{ r.label }}</button>
+              }
+            </div>
             <div class="chart-wrap">
               <canvas #chartCanvas></canvas>
               @if (balanceHistory().length === 0) {
                 <p class="muted chart-empty">Noch keine Auswertung gelaufen.</p>
+              }
+              @if (balanceHistory().length > 0 && chartFilteredHistory().length === 0) {
+                <p class="muted chart-empty">Keine Daten im gewählten Zeitraum.</p>
               }
             </div>
             @if (!hasBenchmarkData()) {
@@ -1373,6 +1388,34 @@ interface MissedOpportunityView {
       }
       .chart-mode-toggle:hover { background: #fff1ea; color: #ff4500; border-color: #ffd0b8; }
 
+      /* ── Chart time-range selector ────────────────────────────────────────── */
+      .chart-range-bar {
+        display: flex;
+        gap: 4px;
+        margin-bottom: 10px;
+        flex-wrap: wrap;
+      }
+      .chart-range-btn {
+        flex: 1 1 auto;
+        min-width: 44px;          /* touch target */
+        padding: 5px 14px;
+        font-size: 0.72rem; font-weight: 600;
+        border: 1px solid #e0e0e0;
+        border-radius: 20px;
+        background: #fafafa;
+        color: #666;
+        cursor: pointer;
+        transition: background 0.13s, color 0.13s, border-color 0.13s;
+        white-space: nowrap;
+        text-align: center;
+      }
+      .chart-range-btn:hover { background: #f0f0f0; color: #333; border-color: #ccc; }
+      .chart-range-btn.active {
+        background: #ff4500;
+        color: #fff;
+        border-color: #ff4500;
+      }
+
       /* ── Generic table-filter text input (watchlist + transactions) ──────── */
       .table-filter {
         display: block; width: 100%; box-sizing: border-box; margin-bottom: 0.6rem;
@@ -2139,6 +2182,35 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     this.renderChart();
   }
 
+  // ── Chart time-range selector ─────────────────────────────────────────────
+  protected readonly chartRanges = [
+    { value: '2d'  as const, label: '2T',    title: 'Letzte 48 Stunden'  },
+    { value: '1w'  as const, label: '1W',    title: 'Letzte 7 Tage'      },
+    { value: '1m'  as const, label: '1M',    title: 'Letzter Monat (30 Tage)' },
+    { value: 'all' as const, label: 'Alles', title: 'Gesamter Zeitraum'  },
+  ];
+
+  protected readonly chartRange = signal<'2d' | '1w' | '1m' | 'all'>('2d');
+
+  protected setChartRange(range: '2d' | '1w' | '1m' | 'all'): void {
+    this.chartRange.set(range);
+    this.renderChart();
+  }
+
+  /** Returns the slice of `balanceHistory` that fits the selected time window. */
+  protected chartFilteredHistory(): BalanceHistoryRow[] {
+    const history = this.balanceHistory();
+    const range = this.chartRange();
+    if (range === 'all') return history;
+    const msMap: Record<string, number> = {
+      '2d': 2  * 24 * 60 * 60 * 1000,
+      '1w': 7  * 24 * 60 * 60 * 1000,
+      '1m': 30 * 24 * 60 * 60 * 1000,
+    };
+    const cutoff = Date.now() - msMap[range];
+    return history.filter((h) => new Date(h.recorded_at).getTime() >= cutoff);
+  }
+
   @ViewChild('allocationCanvas') private allocationCanvas?: ElementRef<HTMLCanvasElement>;
   private allocationChart: Chart | null = null;
 
@@ -2610,12 +2682,22 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   }
 
   protected benchmarkSeries(): (number | null)[] {
-    const history = this.balanceHistory();
-    const initialValue = history.length ? history[0].total_value : 10000;
-    const reference = history.find((h) => h.spy_price !== null && h.spy_price !== undefined)?.spy_price ?? null;
-    if (reference === null) {
-      return history.map(() => null);
-    }
+    return this.benchmarkSeriesFor(this.balanceHistory());
+  }
+
+  /**
+   * Builds the SPY benchmark series for an arbitrary (potentially filtered)
+   * slice of balance history. Normalisation always uses the FULL simulation
+   * start so the benchmark line stays comparable across time windows.
+   */
+  private benchmarkSeriesFor(history: BalanceHistoryRow[]): (number | null)[] {
+    const allHistory = this.balanceHistory();
+    const initialValue = allHistory.length ? allHistory[0].total_value : 10000;
+    // Anchor SPY to the first point in the FULL history that has a price — so
+    // the normalised line always starts at the same capital, not at whichever
+    // snapshot happens to be first in the current window.
+    const reference = allHistory.find((h) => h.spy_price !== null && h.spy_price !== undefined)?.spy_price ?? null;
+    if (reference === null) return history.map(() => null);
     return history.map((h) =>
       h.spy_price !== null && h.spy_price !== undefined ? initialValue * (h.spy_price / reference) : null,
     );
@@ -2751,11 +2833,15 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     if (!canvas) {
       return;
     }
-    const history = this.balanceHistory();
+    // Use the time-range-filtered slice for display; normalise % mode against
+    // the FULL simulation start so "% seit Start" means total return since
+    // inception regardless of which window is zoomed in.
+    const history = this.chartFilteredHistory();
+    const allHistory = this.balanceHistory();
     const labels = history.map((h) =>
       new Date(h.recorded_at).toLocaleString('de-CH', { month: 'short', day: 'numeric', hour: '2-digit' }),
     );
-    const initialValue = history.length ? history[0].total_value : 10000;
+    const initialValue = allHistory.length ? allHistory[0].total_value : 10000;
     const mode = this.chartMode();
     const isPercent = mode === 'percent';
 
@@ -2766,7 +2852,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       v === null ? null : isPercent && initialValue !== 0 ? ((v - initialValue) / initialValue) * 100 : v;
 
     const portfolioRaw = history.map((h) => h.total_value);
-    const benchmarkRaw = this.benchmarkSeries();
+    const benchmarkRaw = this.benchmarkSeriesFor(history);
     const portfolioSeries = portfolioRaw.map(toDisplay);
     const benchmarkSeries = benchmarkRaw.map(toDisplay);
 
