@@ -383,6 +383,9 @@ interface MissedOpportunityView {
                     @if (s.yf_trending) {
                       <span class="badge badge-yf" title="Aktuell auch auf Yahoo Finance (US) als Trending gelistet — unabhängige Bestätigung, dass der Ticker gerade breit beachtet wird.">🔥 YF</span>
                     }
+                    @if (s.finviz_news) {
+                      <span class="badge badge-finviz" title="Ticker aktuell in FinViz-Mainstream-Nachrichten erwähnt. Hinweis: News hinkt Reddit-Hype bei Meme-Stocks typischerweise 1–3 Tage hinterher — Abwesenheit dieses Badges ist kein Warnsignal. Präsenz erhöht aber die Gesamtüberzeugung, besonders bei catalyst-getriebenen Moves.">📰 News</span>
+                    }
                   </td>
                   <td data-label="Typ"><span class="badge" [class]="signalTypeClass(s)">{{ signalTypeLabel(s) }}</span></td>
                   <td data-label="Preis (USD)">{{ s.price | number: '1.2-2' }}</td>
@@ -1021,6 +1024,7 @@ interface MissedOpportunityView {
       .badge-etf { background: #f1e8fb; color: #7c3aed; }
       .badge-unknown { background: #f0f0f0; color: #888; }
       .badge-yf { background: #fff4e0; color: #c87800; margin-left: 5px; font-size: 0.62rem; padding: 1px 5px; }
+      .badge-finviz { background: #e8f4fd; color: #1a6b9a; margin-left: 5px; font-size: 0.62rem; padding: 1px 5px; }
       /* Fear & Greed buy-gate banner */
       .buy-gate-banner {
         background: #fff3cd;

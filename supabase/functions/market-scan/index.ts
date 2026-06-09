@@ -655,7 +655,59 @@ async function fetchVolumeProfile(ticker: string): Promise<VolumeProfile | null>
   }
 }
 
-// ── Source 5 (macro gate): CNN Fear & Greed Index ────────────────────────
+// ── Source 5 (confirmation): FinViz mainstream-news presence ─────────────
+// Free, no API key. Fetches finviz.com/news.ashx (the general market news
+// feed) and extracts every stock ticker referenced via the /stock?t=TICKER
+// href pattern. The resulting Set is stored as `finviz_news` on each signal
+// row — informative only, no effect on buy/sell logic.
+//
+// Design decision: this is deliberately NOT a gate or a hard classification
+// lens. The temporal relationship between Reddit hype and mainstream coverage
+// is complex and asymmetric:
+//   • Meme-stock pumps: Reddit leads by 1–3 days, news follows AFTER the move.
+//     Gating on "no news = no buy" here would filter out the earliest and most
+//     profitable entries.
+//   • Catalyst-driven moves: news breaks first, Reddit piles in hours later.
+//     Here news-backed hype IS more reliable — there's a real fundamental
+//     reason behind the price action.
+// Until we have enough closed trades to empirically measure which pattern
+// dominates our specific dataset, we store the flag and let data accumulate.
+// The planned follow-up SQL (see migration v12 comment) is:
+//   SELECT finviz_news, avg(realized_pnl), count(*) FROM transactions t
+//   JOIN signals s ON ... GROUP BY finviz_news;
+async function fetchFinVizNewsTickers(): Promise<Set<string>> {
+  const url = 'https://finviz.com/news.ashx';
+  try {
+    const res = await fetch(url, {
+      headers: {
+        // A realistic browser UA reduces the chance of a bot-check redirect.
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml',
+      },
+    });
+    if (!res.ok) {
+      console.warn(`FinViz News fetch fehlgeschlagen: ${res.status} — Badge-Spalte bleibt für diesen Lauf leer.`);
+      return new Set();
+    }
+    const html = await res.text();
+    const tickers = new Set<string>();
+    // FinViz embeds stock tickers as /stock?t=TICKER in anchor href attributes.
+    // Regex anchored at the known prefix to avoid false matches elsewhere in the HTML.
+    const tickerRe = /\/stock\?t=([A-Z]{1,5})\b/g;
+    let m: RegExpExecArray | null;
+    while ((m = tickerRe.exec(html)) !== null) {
+      const sym = m[1];
+      if (!TICKER_STOPWORDS.has(sym)) tickers.add(sym);
+    }
+    return tickers;
+  } catch (err) {
+    console.warn(`FinViz News fetch Fehler: ${err} — Badge-Spalte bleibt für diesen Lauf leer.`);
+    return new Set();
+  }
+}
+
+// ── Source 6 (macro gate): CNN Fear & Greed Index ────────────────────────
 // Free, keyless JSON endpoint from CNN's own data-viz CDN. Returns a 0–100
 // score: 0 = "Extreme Fear", 100 = "Extreme Greed". The engine uses it as a
 // hard BUY gate: score < 40 ("Fear" territory) → no new positions opened for
@@ -1104,9 +1156,10 @@ Deno.serve(async () => {
     // Both are "once per run" values — F&G sets a potential buy-gate, YF
     // Trending produces the per-ticker badge. Running them together avoids
     // serialising two more round trips into an already-long scan loop.
-    const [fearGreedResult, yfTrendingSet] = await Promise.all([
+    const [fearGreedResult, yfTrendingSet, finVizNewsSet] = await Promise.all([
       fetchFearAndGreed(),
       fetchYFTrending(),
+      fetchFinVizNewsTickers(),
     ]);
     const fearGreedScore: number | null = fearGreedResult !== null ? fearGreedResult.score : null;
 
@@ -1126,6 +1179,7 @@ Deno.serve(async () => {
       log.push('CNN Fear & Greed: nicht verfügbar — Kauf-Stop nicht aktiv (fail-open).');
     }
     log.push(`YF Trending (US): ${yfTrendingSet.size} Ticker trending${yfTrendingSet.size > 0 ? ` (${[...yfTrendingSet].slice(0, 10).join(', ')}${yfTrendingSet.size > 10 ? ', …' : ''})` : ''}.`);
+    log.push(`FinViz News: ${finVizNewsSet.size} Ticker in Mainstream-Schlagzeilen${finVizNewsSet.size > 0 ? ` (${[...finVizNewsSet].slice(0, 10).join(', ')}${finVizNewsSet.size > 10 ? ', …' : ''})` : ' (oder Fetch blockiert — Badge bleibt leer, kein Handlungseinfluss).'}.`);
 
     // ── Phase 3: evaluate every hot ticker plus anything we still hold ──
     const evaluationSet = new Map<string, number[]>(hotPriceHistory);
@@ -1275,6 +1329,8 @@ Deno.serve(async () => {
         // v11: gate-logging — was this a buy the engine WOULD have made, if not
         // for the F&G score being below 40? See trading_schema_v11.
         skipped_for_fear_greed: skippedForFearGreed,
+        // v12: mainstream-news presence badge (informative only — see fetchFinVizNewsTickers)
+        finviz_news: finVizNewsSet.has(ticker),
       });
       if (signalError) throw signalError;
       log.push(`${ticker}: ${verdict} (hype=${hypeScore.toFixed(0)}, mentions=${mentionCount}, price=${price})`);
@@ -1452,11 +1508,12 @@ Deno.serve(async () => {
               drop_from_high_pct: Math.round(dropFromHigh * 1000) / 10,
               verdict,
               intraday_points: intradayHistory.length,
-              // v11: macro context at buy time — so "did we buy in fear/greed
+              // v11/v12: macro context at buy time — so "did we buy in fear/greed
               // conditions, and how did it turn out?" is directly queryable from
               // the snapshot JSON without needing a timestamp-based join.
               fear_greed_score: fearGreedScore,
               yf_trending: yfTrendingSet.has(ticker),
+              finviz_news: finVizNewsSet.has(ticker),
             };
 
             const { data: txRow } = await supabase

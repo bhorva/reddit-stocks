@@ -256,6 +256,8 @@ export interface SignalSnapshot {
   fear_greed_score?: number | null;
   /** Whether the ticker was on YF Trending at buy time (v11). Absent on pre-v10 buys. */
   yf_trending?: boolean;
+  /** Whether the ticker appeared in FinViz news headlines at buy time (v12). Absent on pre-v12 buys. */
+  finviz_news?: boolean;
 }
 
 export interface TransactionRow {
@@ -405,4 +407,11 @@ export interface SignalRow {
    * orthogonal and independently queryable. `false` for legacy rows (pre-v10).
    */
   skipped_for_fear_greed: boolean;
+  /**
+   * True iff this ticker appeared in FinViz mainstream-news headlines at scan
+   * time. Informative only — no trade-logic effect. `false` for legacy rows
+   * (pre-v12). Stored for future analysis: do news-backed organic signals
+   * outperform Reddit-only ones?
+   */
+  finviz_news: boolean;
 }
