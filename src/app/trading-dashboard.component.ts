@@ -74,6 +74,24 @@ interface MissedOpportunityView {
         <p>Die Trading-Simulation benötigt dieselbe Supabase-Verbindung wie oben beschrieben.</p>
       </div>
     } @else {
+      <!-- ── Fixed notification bell — floats top-right, outside tab flow ── -->
+      <button
+        type="button"
+        class="notif-bell"
+        (click)="openNotifPanel()"
+        title="Benachrichtigungen — alle gesendeten Push-Notifications der Trading-Engine"
+        aria-label="Benachrichtigungen öffnen"
+      >
+        <!-- Outline bell SVG — no emoji, scales cleanly at any DPI -->
+        <svg class="notif-bell-icon" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M10 2.5a5.5 5.5 0 0 1 5.5 5.5c0 3.5 1 4.5 1.5 5H3c.5-.5 1.5-1.5 1.5-5A5.5 5.5 0 0 1 10 2.5Z"/>
+          <path d="M8.5 15.5a1.5 1.5 0 0 0 3 0"/>
+        </svg>
+        @if (unreadCount() > 0) {
+          <span class="notif-badge">{{ unreadCount() > 9 ? '9+' : unreadCount() }}</span>
+        }
+      </button>
+
       <h2 class="section-title">🚀 Reddit-Stonks-Simulation 💎🙌📈</h2>
 
       <div class="tabs">
@@ -108,19 +126,6 @@ interface MissedOpportunityView {
           }
         </button>
         <div class="tab-actions">
-          <!-- Notification bell -->
-          <button
-            type="button"
-            class="notif-bell"
-            (click)="openNotifPanel()"
-            title="Benachrichtigungen — alle gesendeten Push-Notifications der Trading-Engine"
-            aria-label="Benachrichtigungen öffnen"
-          >
-            🔔
-            @if (unreadCount() > 0) {
-              <span class="notif-badge">{{ unreadCount() > 9 ? '9+' : unreadCount() }}</span>
-            }
-          </button>
           <!-- Scan freshness -->
           <span
             class="scan-freshness muted"
@@ -553,7 +558,11 @@ interface MissedOpportunityView {
                     <div class="exit-bar-wrap"
                          [title]="'Trailing Stop aktuell bei ' + (positionView(p).trailingStopPrice | number: '1.2-2') + ' USD (' + (positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1') + '% ab Einstieg). Take-Profit +' + (takeProfit * 100) + '% ab Einstieg.'">
                       <div class="exit-bar-bg">
-                        <div class="exit-bar-zero"></div>
+                        <!-- Zero line: dynamically positioned via exitBarPosition so it
+                             tracks the "break-even" point correctly as the trailing stop
+                             moves up. The hardcoded CSS fallback no longer applies. -->
+                        <div class="exit-bar-zero"
+                             [style.left.%]="exitBarPosition(0, positionView(p).trailingStopPctFromEntry)"></div>
                         <div
                           class="exit-bar-marker"
                           [style.left.%]="exitBarPosition(positionView(p).changePct!, positionView(p).trailingStopPctFromEntry)"
@@ -1054,7 +1063,7 @@ interface MissedOpportunityView {
           @if (missedOpportunities().length === 0) {
             <p class="muted">
               Noch keine verpassten Chancen erfasst — entweder lief das Portfolio noch nie voll
-              (aktuell {{ positions().length }}/3 Positionen offen), oder es gab seit Einführung
+              (aktuell {{ positions().length }}/{{ maxPositions }} Positionen offen), oder es gab seit Einführung
               dieser Auswertung schlicht noch keinen Fall, in dem die Heuristik bei voller Bank
               kaufen wollte.
             </p>
@@ -1269,7 +1278,8 @@ interface MissedOpportunityView {
       .exit-bar-wrap { margin-top: 4px; }
       .exit-bar-bg { position: relative; background: #eee; border-radius: 4px; height: 6px; }
       .exit-bar-zero {
-        position: absolute; top: -2px; bottom: -2px; left: calc(3.5 / 7.5 * 100%);
+        position: absolute; top: -2px; bottom: -2px;
+        /* left is set via [style.left.%] — dynamic per trailing-stop level */
         width: 1px; background: #bbb;
       }
       .exit-bar-marker {
@@ -1289,7 +1299,10 @@ interface MissedOpportunityView {
         border-radius: 20px; padding: 1px 7px;
       }
       .tab.active .tab-count { background: #ffe3d6; color: #ff4500; }
-      .tab-actions { margin-left: auto; display: flex; align-items: center; gap: 0.6rem; }
+      .tab-actions { margin-left: auto; display: flex; align-items: center; }
+      /* Extra right-padding so the scan-freshness text doesn't collide with
+         the fixed bell button (36px wide + 16px right offset + 8px gap = 60px) */
+      .tab-actions { padding-right: 52px; }
       .scan-freshness { align-self: center; font-size: 0.72rem; white-space: nowrap; }
       .scan-stale { color: #d9534f; font-weight: 600; }
       .fx-note { margin: -0.5rem 0 1rem; line-height: 1.4; }
@@ -1602,22 +1615,41 @@ interface MissedOpportunityView {
     `,
     /* ── Notification Center ─────────────────────────────────────────────── */
     `
-      /* Bell button — sits inside .tab-actions (right end of the tab bar) */
+      /*
+       * Fixed notification bell — top-right corner, always visible regardless
+       * of scroll depth. Follows the Linear / Vercel / GitHub convention of a
+       * persistent action affordance anchored to the viewport edge rather than
+       * buried inside a tab row where it competes for attention with navigation.
+       * z-index 990 keeps it below the panel/backdrop (1000/1001) but above
+       * all regular page content.
+       */
       .notif-bell {
-        position: relative;
-        background: none; border: none; cursor: pointer;
-        padding: 5px 7px; border-radius: 8px;
-        font-size: 1.05rem; line-height: 1;
+        position: fixed;
+        top: 14px; right: 16px;
+        z-index: 990;
+        display: flex; align-items: center; justify-content: center;
+        width: 36px; height: 36px;
+        background: #fff;
+        border: 1px solid rgba(0,0,0,0.10);
+        border-radius: 10px;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+        cursor: pointer;
         color: #555;
-        transition: background 0.15s, transform 0.12s;
-        flex-shrink: 0;
+        transition: background 0.15s, box-shadow 0.15s, color 0.15s;
+        padding: 0;
       }
-      .notif-bell:hover  { background: #f0f0f0; transform: scale(1.1); }
-      .notif-bell:active { transform: scale(0.92); }
+      .notif-bell:hover {
+        background: #f7f7f8;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+        color: #111;
+      }
+      .notif-bell:active { transform: scale(0.94); }
 
-      /* Unread count badge (red dot with number) */
+      .notif-bell-icon { width: 18px; height: 18px; display: block; }
+
+      /* Unread badge */
       .notif-badge {
-        position: absolute; top: -1px; right: -2px;
+        position: absolute; top: -4px; right: -4px;
         min-width: 16px; height: 16px;
         background: #e53935; color: #fff;
         font-size: 0.55rem; font-weight: 800;
