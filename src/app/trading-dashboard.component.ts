@@ -1012,16 +1012,25 @@ interface MissedOpportunityView {
           <div class="notif-panel-head">
             <div class="notif-panel-title">
               <span>Benachrichtigungen</span>
-              @if (pushNotifications().length > 0) {
-                <span class="notif-total-count">{{ pushNotifications().length }}</span>
+              @if (unreadCount() > 0) {
+                <span class="notif-unread-count">{{ unreadCount() }} neu</span>
               }
             </div>
-            <button
-              type="button"
-              class="notif-panel-close"
-              (click)="closeNotifPanel()"
-              aria-label="Panel schliessen"
-            >✕</button>
+            <div class="notif-head-actions">
+              @if (unreadCount() > 0) {
+                <button
+                  type="button"
+                  class="notif-markall"
+                  (click)="markAllNotifRead()"
+                >Alle gelesen</button>
+              }
+              <button
+                type="button"
+                class="notif-panel-close"
+                (click)="closeNotifPanel()"
+                aria-label="Panel schliessen"
+              >✕</button>
+            </div>
           </div>
 
           <!-- Empty state -->
@@ -1040,7 +1049,15 @@ interface MissedOpportunityView {
               @for (group of notifGroups(); track group.label) {
                 <div class="notif-day-label">{{ group.label }}</div>
                 @for (n of group.items; track n.id) {
-                  <div class="notif-item" [class]="notifTypeClass(n)">
+                  <div
+                    class="notif-item"
+                    [class]="notifItemClass(n)"
+                    (click)="markNotifRead(n)"
+                    (keydown.enter)="markNotifRead(n)"
+                    role="button"
+                    tabindex="0"
+                    [attr.aria-label]="(isNotifUnread(n) ? 'Ungelesen: ' : '') + n.title"
+                  >
                     <div class="notif-item-icon-wrap">
                       <span class="notif-item-icon">{{ notifEmoji(n) }}</span>
                     </div>
@@ -1051,6 +1068,9 @@ interface MissedOpportunityView {
                       </div>
                       <div class="notif-item-msg">{{ n.message }}</div>
                     </div>
+                    @if (isNotifUnread(n)) {
+                      <span class="notif-unread-dot" aria-hidden="true"></span>
+                    }
                   </div>
                 }
               }
@@ -1739,11 +1759,19 @@ interface MissedOpportunityView {
         display: flex; align-items: center; gap: 0.5rem;
         font-size: 0.88rem; font-weight: 700; color: #1a1a1a;
       }
-      .notif-total-count {
-        background: #f0f0f0; color: #666;
-        font-size: 0.63rem; font-weight: 700;
-        border-radius: 20px; padding: 2px 7px;
+      .notif-unread-count {
+        background: #2563eb; color: #fff;
+        font-size: 0.6rem; font-weight: 700;
+        border-radius: 20px; padding: 2px 8px;
       }
+      .notif-head-actions { display: flex; align-items: center; gap: 0.35rem; }
+      .notif-markall {
+        background: none; border: none; cursor: pointer;
+        font-size: 0.68rem; font-weight: 600; color: #2563eb;
+        padding: 4px 7px; border-radius: 6px; white-space: nowrap;
+        transition: background 0.12s;
+      }
+      .notif-markall:hover { background: #eff6ff; }
       .notif-panel-close {
         background: none; border: none; cursor: pointer;
         font-size: 0.95rem; color: #aaa;
@@ -1790,8 +1818,20 @@ interface MissedOpportunityView {
         padding: 0.75rem 1rem;
         border-left: 3px solid transparent;
         transition: background 0.1s;
+        cursor: pointer;
+        position: relative;
       }
       .notif-item:hover { background: #fafafa; }
+      .notif-item:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; }
+
+      /* Read items are de-emphasized; unread get a tint + a dot + stronger title. */
+      .notif-unread { background: #f7faff; }
+      .notif-unread:hover { background: #eef5ff; }
+      .notif-unread-dot {
+        align-self: center; flex-shrink: 0;
+        width: 8px; height: 8px; border-radius: 50%;
+        background: #2563eb;
+      }
       /* Separator between adjacent items of same day */
       .notif-day-label + .notif-item { border-top: none; }
       .notif-item ~ .notif-item { border-top: 1px solid #f5f5f5; }
@@ -1824,10 +1864,11 @@ interface MissedOpportunityView {
         justify-content: space-between; gap: 0.5rem;
       }
       .notif-item-title {
-        font-size: 0.8rem; font-weight: 600; color: #111;
+        font-size: 0.8rem; font-weight: 600; color: #6b7280; /* read: dimmed */
         white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         flex: 1; min-width: 0;
       }
+      .notif-unread .notif-item-title { color: #111; font-weight: 700; }
       .notif-item-time {
         font-size: 0.62rem; white-space: nowrap; flex-shrink: 0;
       }
@@ -1854,30 +1895,100 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   protected readonly pushNotifications = signal<PushNotificationRow[]>([]);
   protected readonly notifPanelOpen = signal(false);
 
-  /** ISO timestamp of when the user last had the panel open — stored in
-   *  localStorage so unread counts survive page reloads. */
-  private static readonly NOTIF_SEEN_KEY = 'notif_last_seen_at';
+  /**
+   * Per-message read model (replaces the old single "last seen" timestamp that
+   * marked EVERYTHING read the moment the panel opened):
+   *  - `notifReadIds` — ids the user has explicitly clicked, persisted in
+   *    localStorage so read state survives reloads.
+   *  - `notifBaselineAt` — a fixed cut-off captured ONCE; anything created at or
+   *    before it counts as already-read. This keeps existing users (migrating
+   *    from the old timestamp) and fresh installs from getting a huge first-load
+   *    badge. "Alle gelesen" bumps it to now.
+   * A notification is UNREAD iff it is newer than the baseline AND its id is not
+   * in the read set. The badge counts only those and hides at zero.
+   */
+  private static readonly NOTIF_READ_KEY = 'notif_read_ids';
+  private static readonly NOTIF_BASELINE_KEY = 'notif_baseline_at';
 
-  private notifLastSeenAt(): Date {
-    const raw = localStorage.getItem(TradingDashboardComponent.NOTIF_SEEN_KEY);
-    // Default: 7 days ago, so freshly-arriving users see recent items as unread
-    // without seeing an enormous badge counting every historical notification.
-    if (!raw) return new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const d = new Date(raw);
-    return isNaN(d.getTime()) ? new Date(0) : d;
+  protected readonly notifBaselineAt = signal<Date>(TradingDashboardComponent.initNotifBaseline());
+  protected readonly notifReadIds = signal<Set<number>>(TradingDashboardComponent.loadNotifReadIds());
+
+  private static initNotifBaseline(): Date {
+    try {
+      let raw = localStorage.getItem(TradingDashboardComponent.NOTIF_BASELINE_KEY);
+      if (!raw) {
+        // Migrate from the old single "last seen" timestamp if present; else
+        // start at "now" so a fresh user only ever sees FUTURE notifications as
+        // unread, never the whole loaded history at once.
+        raw = localStorage.getItem('notif_last_seen_at') ?? new Date().toISOString();
+        localStorage.setItem(TradingDashboardComponent.NOTIF_BASELINE_KEY, raw);
+      }
+      const d = new Date(raw);
+      return isNaN(d.getTime()) ? new Date(0) : d;
+    } catch {
+      return new Date(0);
+    }
+  }
+
+  private static loadNotifReadIds(): Set<number> {
+    try {
+      const raw = localStorage.getItem(TradingDashboardComponent.NOTIF_READ_KEY);
+      const arr = raw ? (JSON.parse(raw) as unknown) : [];
+      return new Set(Array.isArray(arr) ? (arr as number[]) : []);
+    } catch {
+      return new Set();
+    }
+  }
+
+  private persistNotifReadIds(ids: Set<number>): void {
+    try {
+      localStorage.setItem(TradingDashboardComponent.NOTIF_READ_KEY, JSON.stringify([...ids]));
+    } catch {
+      /* storage unavailable — read state just won't persist beyond this session */
+    }
+  }
+
+  /** True when a notification is newer than the baseline AND not yet clicked. */
+  protected isNotifUnread(n: PushNotificationRow): boolean {
+    return new Date(n.created_at) > this.notifBaselineAt() && !this.notifReadIds().has(n.id);
   }
 
   protected readonly unreadCount = computed(() => {
-    const lastSeen = this.notifLastSeenAt();
+    const readIds = this.notifReadIds();
+    const baseline = this.notifBaselineAt();
     return this.pushNotifications().filter(
-      (n) => new Date(n.created_at) > lastSeen,
+      (n) => new Date(n.created_at) > baseline && !readIds.has(n.id),
     ).length;
   });
 
+  /** Mark a single notification read (on click). No-op if already read. */
+  protected markNotifRead(n: PushNotificationRow): void {
+    if (!this.isNotifUnread(n)) return;
+    const next = new Set(this.notifReadIds());
+    next.add(n.id);
+    this.notifReadIds.set(next);
+    this.persistNotifReadIds(next);
+  }
+
+  /** Mark everything currently loaded as read — bump the baseline to now. */
+  protected markAllNotifRead(): void {
+    const now = new Date();
+    this.notifBaselineAt.set(now);
+    localStorage.setItem(TradingDashboardComponent.NOTIF_BASELINE_KEY, now.toISOString());
+    this.notifReadIds.set(new Set());
+    this.persistNotifReadIds(new Set());
+  }
+
+  /** Combined CSS class for an item: event-type accent + unread highlight. */
+  protected notifItemClass(n: PushNotificationRow): string {
+    return this.notifTypeClass(n) + (this.isNotifUnread(n) ? ' notif-unread' : '');
+  }
+
   protected openNotifPanel(): void {
+    // Opening no longer marks everything read — that's now per-message (click)
+    // or via the explicit "Alle gelesen" action — so the badge keeps reflecting
+    // only the notifications the user hasn't actually looked at yet.
     this.notifPanelOpen.set(true);
-    // Mark everything currently loaded as "seen"
-    localStorage.setItem(TradingDashboardComponent.NOTIF_SEEN_KEY, new Date().toISOString());
   }
 
   protected closeNotifPanel(): void {
