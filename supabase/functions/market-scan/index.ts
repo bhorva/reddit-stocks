@@ -1230,14 +1230,25 @@ Deno.serve(async () => {
       // deliberately excluded from `wouldHaveBought` — those aren't "missed
       // opportunities" in the interesting sense, see
       // trading_schema_v6_missed_opportunities.sql for the full reasoning.)
-      const wouldHaveBought =
+      // Base buy-eligibility — everything except the capacity gate and the F&G
+      // gate. Used as the shared foundation for both "skipped" flags below so
+      // neither has to repeat the full condition list.
+      const buyEligible =
         marketOpen &&
-        !buyGateActive &&
         !position &&
         verdict === 'organic' &&
         instrumentInfoByTicker.get(ticker)?.isEtf !== true &&
         dropFromHigh <= DIP_THRESH;
+
+      // `wouldHaveBought` — eligible AND F&G gate not blocking AND capacity free.
+      // Used for the "Verpasste Chancen" tab (capacity-only misses).
+      const wouldHaveBought = buyEligible && !buyGateActive;
       const skippedForCapacity = wouldHaveBought && positions.length >= MAX_POSITIONS;
+
+      // `skippedForFearGreed` — eligible but ONLY the F&G gate stopped it.
+      // Deliberately excludes capacity blocks so the two "why didn't we buy"
+      // reasons stay orthogonal and independently queryable in the DB.
+      const skippedForFearGreed = buyEligible && buyGateActive;
 
       const { error: signalError } = await supabase.from('signals').insert({
         ticker,
@@ -1261,6 +1272,9 @@ Deno.serve(async () => {
         // v10: macro context at scan time — see trading_schema_v10_fear_greed_yf_trending.sql
         fear_greed_score: fearGreedScore,
         yf_trending: yfTrendingSet.has(ticker),
+        // v11: gate-logging — was this a buy the engine WOULD have made, if not
+        // for the F&G score being below 40? See trading_schema_v11.
+        skipped_for_fear_greed: skippedForFearGreed,
       });
       if (signalError) throw signalError;
       log.push(`${ticker}: ${verdict} (hype=${hypeScore.toFixed(0)}, mentions=${mentionCount}, price=${price})`);
@@ -1438,6 +1452,11 @@ Deno.serve(async () => {
               drop_from_high_pct: Math.round(dropFromHigh * 1000) / 10,
               verdict,
               intraday_points: intradayHistory.length,
+              // v11: macro context at buy time — so "did we buy in fear/greed
+              // conditions, and how did it turn out?" is directly queryable from
+              // the snapshot JSON without needing a timestamp-based join.
+              fear_greed_score: fearGreedScore,
+              yf_trending: yfTrendingSet.has(ticker),
             };
 
             const { data: txRow } = await supabase

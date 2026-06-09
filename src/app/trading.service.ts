@@ -252,6 +252,10 @@ export interface SignalSnapshot {
   drop_from_high_pct: number;
   verdict: string;
   intraday_points: number;
+  /** CNN Fear & Greed score at buy time (v11). `null` for buys before v10. */
+  fear_greed_score?: number | null;
+  /** Whether the ticker was on YF Trending at buy time (v11). Absent on pre-v10 buys. */
+  yf_trending?: boolean;
 }
 
 export interface TransactionRow {
@@ -393,4 +397,12 @@ export interface SignalRow {
    * (pre-v10 migration), treated as "was not trending" rather than "unknown".
    */
   yf_trending: boolean;
+  /**
+   * True iff ALL buy conditions were met (organic verdict, dip threshold,
+   * market open, no existing position, not an ETF) but the CNN Fear & Greed
+   * gate (score < 40) was the sole reason no position was opened. Analogous
+   * to `skipped_for_capacity` — keeps the two "why didn't we buy" reasons
+   * orthogonal and independently queryable. `false` for legacy rows (pre-v10).
+   */
+  skipped_for_fear_greed: boolean;
 }
