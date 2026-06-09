@@ -134,9 +134,8 @@ const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 // classified 'organic' in at least CONSECUTIVE_ORGANIC_THRESHOLD prior
 // scans in a row (Measure 3) — repeated confirmation is strong evidence of
 // a genuine trend, not a one-scan noise spike.
-const NEAR_DIP_BUFFER = 0.01;           // 1 pp above DIP_THRESH still qualifies
-const NEAR_MISS_POSITION_FACTOR = 0.5;  // half position for near-miss entries
-const CONSECUTIVE_ORGANIC_THRESHOLD = 2; // prior organic scans needed to upgrade to full size
+const NEAR_DIP_BUFFER = 0.01;            // 1 pp above DIP_THRESH qualifies — but only with streak confirmation
+const CONSECUTIVE_ORGANIC_THRESHOLD = 2; // min consecutive prior organic scans required for a near-miss buy
 
 // Currency-conversion spread Swissquote charges when trading USD-denominated
 // stocks from a CHF-denominated account (in addition to the brokerage
@@ -1637,23 +1636,25 @@ Deno.serve(async () => {
         // (`recentHigh`/`dropFromHigh` are now hoisted above, alongside
         // `position` — see the comment there for why both moved up.)
         if (isFullDip || isNearMiss) {
-          // ── Measure 1 + 3: determine position size factor ────────────────
-          // Full dip → always full size (1.0).
-          // Near-miss → half size (0.5) unless 2+ consecutive prior scans
-          // already confirmed 'organic' for this ticker, in which case the
-          // sustained signal upgrades the entry back to full size.
-          let positionFactor = 1.0;
+          // ── Measure 1 + 3: near-miss only buys with confirmed trend ─────
+          // Full dip → always buy (full size).
+          // Near-miss → only buy if 2+ consecutive prior organic scans
+          // confirm this is a real trend, not a one-scan noise spike.
+          // In that case: full position immediately — no half-size trades
+          // (a half position carries a disproportionately high fee ratio
+          // due to Swissquote's near-flat brokerage and can't be topped up
+          // once the position is open, making it worse on both dimensions).
           let consecutiveOrganic = 0;
           let entryNote = '';
           if (isNearMiss) {
             consecutiveOrganic = await getConsecutiveOrganicCount(supabase, ticker);
-            if (consecutiveOrganic >= CONSECUTIVE_ORGANIC_THRESHOLD) {
-              positionFactor = 1.0;
-              entryNote = ` Near-Miss-Einstieg, aber volle Positionsgrösse: ${consecutiveOrganic}× in Folge organisch bestätigt.`;
-            } else {
-              positionFactor = NEAR_MISS_POSITION_FACTOR;
-              entryNote = ` Near-Miss-Einstieg (Dip ${(dropFromHigh * 100).toFixed(1)}%, Schwelle −${(Math.abs(DIP_THRESH) * 100).toFixed(0)}%) → halbe Position.`;
+            if (consecutiveOrganic < CONSECUTIVE_ORGANIC_THRESHOLD) {
+              // Not enough confirmation yet — skip and wait for a full dip
+              // or more consecutive organic scans.
+              log.push(`${ticker}: Near-Miss (Dip ${(dropFromHigh * 100).toFixed(1)}%) übersprungen — erst ${consecutiveOrganic}/${CONSECUTIVE_ORGANIC_THRESHOLD} aufeinanderfolgende organische Scans.`);
+              continue;
             }
+            entryNote = ` Near-Miss-Einstieg (Dip ${(dropFromHigh * 100).toFixed(1)}%, Schwelle −${(Math.abs(DIP_THRESH) * 100).toFixed(0)}%), bestätigt durch ${consecutiveOrganic}× in Folge organisch.`;
           }
 
           // `cash` is CHF; open positions' mark-to-market value is computed
@@ -1666,7 +1667,7 @@ Deno.serve(async () => {
             0,
           );
           const totalValue = portfolio.cash + positionsValueUsd * usdChfRate;
-          const budget = totalValue * POSITION_SIZE * positionFactor; // CHF — scaled by conviction
+          const budget = totalValue * POSITION_SIZE; // CHF
           const fee = swissquoteFee(budget);
           const fx = fxFee(budget);
           const investable = budget - fee - fx; // CHF actually available to convert & invest
@@ -1705,7 +1706,6 @@ Deno.serve(async () => {
               // Measure 1 + 3: entry confidence metadata
               near_miss_entry: isNearMiss,
               consecutive_organic_prior: consecutiveOrganic,
-              position_factor: positionFactor,
             };
 
             const { data: txRow } = await supabase
