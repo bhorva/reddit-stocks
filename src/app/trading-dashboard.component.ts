@@ -964,25 +964,11 @@ interface MissedOpportunityView {
       .grid-mid { display: grid; grid-template-columns: 2fr 1fr; gap: 1rem; margin-bottom: 1rem; }
       .grid-bot { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem; }
       .grid-bot-single { grid-template-columns: 1fr; }
-      /*
-        Transactions tab: lets the (often very wide) table breathe beyond the
-        dashboard's normal column width by breaking out of app.component's
-        .container. Its own max-width is intentionally larger than the
-        container's (1440px) so it still gains real extra room on wide
-        viewports rather than just matching — but caps out before becoming
-        uncomfortably wide on ultra-wide monitors.
-      */
-      .tx-wide {
-        position: relative;
-        left: 50%;
-        transform: translateX(-50%);
-        width: calc(100vw - 2rem);
-        max-width: 1640px;
-        box-sizing: border-box;
-      }
-      @media (max-width: 1640px) {
-        .tx-wide { position: static; left: auto; transform: none; width: auto; max-width: none; }
-      }
+      /* .tx-wide: Transactions and Verpasste Chancen tabs — same width as the
+         rest of the dashboard (no viewport breakout). The table scrolls
+         horizontally inside its wrapper when the content is wider than the
+         available space (see .tx-table-wrap below). */
+      .tx-wide { /* intentionally no override — normal block flow */ }
       @media (max-width: 900px) {
         .grid-stats, .grid-mid, .grid-bot { grid-template-columns: 1fr; }
       }
@@ -1126,8 +1112,10 @@ interface MissedOpportunityView {
       .insights-table th { color: #888; font-weight: 600; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.02em; }
       .insights-hint { margin: 0.5rem 0 0; }
       .tx-summary { margin-bottom: 0.75rem; }
-      .tx-table-wrap { max-height: 560px; overflow-y: auto; overflow-x: hidden; }
-      .tx-table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: 0.78rem; }
+      /* overflow-x: auto so the table scrolls horizontally instead of expanding
+         the card when the viewport is narrower than the table's min-width. */
+      .tx-table-wrap { max-height: 560px; overflow-y: auto; overflow-x: auto; }
+      .tx-table { width: 100%; min-width: 680px; table-layout: fixed; border-collapse: collapse; font-size: 0.78rem; }
       .tx-table col.col-date { width: 13%; }
       .tx-table col.col-action { width: 8%; }
       .tx-table col.col-ticker { width: 8%; }
@@ -1168,6 +1156,22 @@ interface MissedOpportunityView {
       }
       .table-filter:focus { outline: none; border-color: #ff4500; box-shadow: 0 0 0 2px #ffe3d6; }
       .table-filter::placeholder { color: #aaa; }
+
+      /* ── Watchlist / signal table: desktop layout ───────────────────────────
+         .mobile-card-table switches to a card-per-row layout on narrow
+         screens (see @media). On desktop it stays a regular table; these
+         styles give it the same cell padding and row borders as .tx-table
+         so the card's 1 rem padding is visually apparent above the header
+         and below the last data row. Without this the browser defaults give
+         near-zero cell padding, making the table look flush with the card. */
+      .mobile-card-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+      .mobile-card-table thead th {
+        text-align: left; font-size: 0.68rem; text-transform: uppercase;
+        letter-spacing: .05em; color: #888; padding: 6px 8px;
+        border-bottom: 2px solid #e2e2e2; white-space: nowrap;
+      }
+      .mobile-card-table tbody td { padding: 7px 8px; border-bottom: 1px solid #f0f0f0; vertical-align: middle; }
+      .mobile-card-table tbody tr:last-child td { border-bottom: none; }
 
       /* ── Sortable column headers (Watchlist & Signale) ───────────────────── */
       th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
@@ -1287,9 +1291,8 @@ interface MissedOpportunityView {
         .mobile-card-table .hype-bar-bg,
         .mobile-card-table .sent-track { min-width: 60px; }
 
-        /* ── Transaction table: horizontal scroll (too many cols for cards) ── */
-        .tx-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-        .tx-table { min-width: 700px; }
+        /* ── Transaction table: tighter min-width on small screens ── */
+        .tx-table { min-width: 540px; }
 
         /* ── Section title ── */
         .section-title { font-size: 1.1rem; }
