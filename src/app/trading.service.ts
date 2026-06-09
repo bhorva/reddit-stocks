@@ -296,6 +296,12 @@ export interface BalanceHistoryRow {
    * FX-rate migration.
    */
   usd_chf_rate: number | null;
+  /**
+   * CNN Fear & Greed Index score (0–100) at snapshot time. `null` for legacy
+   * rows that predate the v10 migration. Score < 40 = Fear territory; buy-gate
+   * was active for that run (no new positions opened).
+   */
+  fear_greed_score: number | null;
 }
 
 /** Row of `trade_outcomes_by_verdict` — see trading_schema_v3_signal_performance_views.sql */
@@ -375,4 +381,16 @@ export interface SignalRow {
    * analysis. `false` for legacy rows, same convention as `would_have_bought`.
    */
   skipped_for_capacity: boolean;
+  /**
+   * CNN Fear & Greed Index score (0–100) at scan time. `null` for legacy rows
+   * that predate the v10 migration. Score < 40 at this moment means the
+   * buy-gate was active — no new positions were opened in this scan run.
+   */
+  fear_greed_score: number | null;
+  /**
+   * True iff this ticker appeared on Yahoo Finance US Trending at scan time.
+   * Informative only — no trade-logic effect. `false` for legacy rows
+   * (pre-v10 migration), treated as "was not trending" rather than "unknown".
+   */
+  yf_trending: boolean;
 }

@@ -655,6 +655,75 @@ async function fetchVolumeProfile(ticker: string): Promise<VolumeProfile | null>
   }
 }
 
+// ── Source 5 (macro gate): CNN Fear & Greed Index ────────────────────────
+// Free, keyless JSON endpoint from CNN's own data-viz CDN. Returns a 0–100
+// score: 0 = "Extreme Fear", 100 = "Extreme Greed". The engine uses it as a
+// hard BUY gate: score < 40 ("Fear" territory) → no new positions opened for
+// this run, existing stop-loss/take-profit levels continue unchanged. The
+// reasoning: when the broad market is pricing in elevated fear, even genuinely
+// "organic" single-stock hype is more likely to get swept up in a general
+// sell-off than to deliver the swing-trading gains the strategy is sized for.
+// It's a blunt instrument (the score has nothing to do with individual ticker
+// quality) but it's cheap, signal-independent, and wrong in the right direction
+// — the cost of a missed entry during a fearful market is much lower than the
+// cost of an entry that gets stopped out by macro panic two days later.
+async function fetchFearAndGreed(): Promise<{ score: number; label: string } | null> {
+  const url = 'https://production.dataviz.cnn.io/index/fearandgreed/graphdata';
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+    });
+    if (!res.ok) {
+      console.warn(`CNN Fear & Greed fetch fehlgeschlagen: ${res.status}`);
+      return null;
+    }
+    const data = await res.json();
+    const score = data?.fear_and_greed?.score;
+    const rating = data?.fear_and_greed?.rating;
+    if (typeof score !== 'number' || !Number.isFinite(score)) {
+      console.warn('CNN Fear & Greed: unerwartetes Antwortformat — Score nicht gefunden.');
+      return null;
+    }
+    return { score: Math.round(score), label: typeof rating === 'string' ? rating : '' };
+  } catch (err) {
+    console.warn(`CNN Fear & Greed fetch Fehler: ${err}`);
+    return null;
+  }
+}
+
+// ── Source 6 (informative): Yahoo Finance US Trending Tickers ────────────
+// Free, keyless endpoint that returns which tickers are trending on YF right
+// now. Used as an INFORMATIVE-ONLY badge on signal rows — stored as a boolean
+// flag (`yf_trending`) on each `signals` row so the dashboard can show "this
+// ticker is also hot on YF right now". No effect on buy/sell logic (yet):
+// the set of YF-trending tickers overlaps heavily with our ApeWisdom/Reddit
+// discovery, so it would add little incremental edge as a filter — but as a
+// visual corroboration signal ("Reddit AND Yahoo both see it") it adds genuine
+// context for a human reviewing the watchlist.
+async function fetchYFTrending(): Promise<Set<string>> {
+  const url = 'https://query1.finance.yahoo.com/v1/finance/trending/US';
+  try {
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+    });
+    if (!res.ok) {
+      console.warn(`YF Trending fetch fehlgeschlagen: ${res.status}`);
+      return new Set();
+    }
+    const data = await res.json();
+    const quotes: unknown[] = data?.finance?.result?.[0]?.quotes ?? [];
+    const tickers = new Set<string>();
+    for (const q of quotes) {
+      const sym = (q as Record<string, unknown>)?.symbol;
+      if (typeof sym === 'string' && sym) tickers.add(sym.toUpperCase());
+    }
+    return tickers;
+  } catch (err) {
+    console.warn(`YF Trending fetch Fehler: ${err}`);
+    return new Set();
+  }
+}
+
 // ── Hype classification ──────────────────────────────────────────────────
 // Correlates FIVE independent lenses so no single noisy source can drive a
 // trade on its own: how much MORE a ticker is being mentioned than usual
@@ -1031,6 +1100,33 @@ Deno.serve(async () => {
     const usdChfRate = await fetchUsdChfRate();
     log.push(`Wechselkurs USD→CHF: ${usdChfRate.toFixed(4)} (live, Yahoo Finance USDCHF=X).`);
 
+    // ── Fear & Greed + YF Trending, fetched in parallel ─────────────────
+    // Both are "once per run" values — F&G sets a potential buy-gate, YF
+    // Trending produces the per-ticker badge. Running them together avoids
+    // serialising two more round trips into an already-long scan loop.
+    const [fearGreedResult, yfTrendingSet] = await Promise.all([
+      fetchFearAndGreed(),
+      fetchYFTrending(),
+    ]);
+    const fearGreedScore: number | null = fearGreedResult !== null ? fearGreedResult.score : null;
+
+    // Hard buy-gate: score below 40 ("Fear") → skip ALL new position openings
+    // for this run. Sell/stop-loss/take-profit checks continue unchanged —
+    // the gate only prevents ADDING new risk when the market is in fear mode.
+    const buyGateActive = fearGreedScore !== null && fearGreedScore < 40;
+
+    if (fearGreedScore !== null) {
+      log.push(
+        `CNN Fear & Greed: ${fearGreedScore} (${fearGreedResult!.label})` +
+          (buyGateActive
+            ? ` — Kauf-Stop aktiv (Score < 40). Keine neuen Positionen in diesem Lauf.`
+            : ` — Score ≥ 40, neue Käufe erlaubt.`),
+      );
+    } else {
+      log.push('CNN Fear & Greed: nicht verfügbar — Kauf-Stop nicht aktiv (fail-open).');
+    }
+    log.push(`YF Trending (US): ${yfTrendingSet.size} Ticker trending${yfTrendingSet.size > 0 ? ` (${[...yfTrendingSet].slice(0, 10).join(', ')}${yfTrendingSet.size > 10 ? ', …' : ''})` : ''}.`);
+
     // ── Phase 3: evaluate every hot ticker plus anything we still hold ──
     const evaluationSet = new Map<string, number[]>(hotPriceHistory);
     for (const ticker of positionTickers) {
@@ -1136,6 +1232,7 @@ Deno.serve(async () => {
       // trading_schema_v6_missed_opportunities.sql for the full reasoning.)
       const wouldHaveBought =
         marketOpen &&
+        !buyGateActive &&
         !position &&
         verdict === 'organic' &&
         instrumentInfoByTicker.get(ticker)?.isEtf !== true &&
@@ -1161,6 +1258,9 @@ Deno.serve(async () => {
         // as-is (honest "fewer than 5 tagged messages" — see `classify`),
         // never coerced to 0, which would misrepresent thin data as neutral.
         sentiment_ratio: sentimentRatio === null ? null : Math.round(sentimentRatio * 1000) / 1000,
+        // v10: macro context at scan time — see trading_schema_v10_fear_greed_yf_trending.sql
+        fear_greed_score: fearGreedScore,
+        yf_trending: yfTrendingSet.has(ticker),
       });
       if (signalError) throw signalError;
       log.push(`${ticker}: ${verdict} (hype=${hypeScore.toFixed(0)}, mentions=${mentionCount}, price=${price})`);
@@ -1280,6 +1380,7 @@ Deno.serve(async () => {
       // of an actual ETF slipping through with no `instrumentType` at all.
       if (
         marketOpen &&
+        !buyGateActive &&
         !position &&
         verdict === 'organic' &&
         instrumentInfoByTicker.get(ticker)?.isEtf !== true &&
@@ -1399,6 +1500,10 @@ Deno.serve(async () => {
       total_value: portfolio.cash + positionsValue,
       spy_price: spyPrice,
       usd_chf_rate: usdChfRate,
+      // v10: macro gate score stored on every snapshot — dashboard derives the
+      // "latest" F&G reading from balance_history (written every run, trades or
+      // not), so the stat card stays current between trade runs too.
+      fear_greed_score: fearGreedScore,
     });
 
     return new Response(JSON.stringify({ ok: true, log }, null, 2), {

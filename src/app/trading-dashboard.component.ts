@@ -130,6 +130,14 @@ interface MissedOpportunityView {
         gehandelt werden).
       </p>
 
+      @if (buyGateActive()) {
+        <div class="buy-gate-banner">
+          🛑 <strong>Kauf-Stop aktiv</strong> — CNN Fear &amp; Greed Index: <strong>{{ latestFearGreedScore() }}</strong> (unter 40 = Angst-Zone).
+          Die Engine öffnet in diesem Zustand keine neuen Positionen.
+          Bestehende Stop-Loss- und Take-Profit-Schwellen laufen weiter.
+        </div>
+      }
+
       @if (error()) {
         <div class="error">{{ error() }}</div>
       }
@@ -186,6 +194,19 @@ interface MissedOpportunityView {
             <h3>Hype-Blocks <span class="info-icon" infoTip="Anzahl Aktien, bei denen die Engine einen Erwähnungs-Anstieg als reinen, unbegründeten Hype eingestuft und deshalb BEWUSST NICHT gehandelt hat ('Pure-Hype'-Verdict). Das verhinderte Kapital, das damit nicht riskiert wurde, steht darunter — eine Wette, die nicht eingegangen wurde, ist hier ein Erfolg, kein verpasster Gewinn (zumindest, wenn die Klassifikation stimmt — siehe 'Lern-Insights' weiter unten).">ⓘ</span></h3>
             <div class="stat-value neu">{{ portfolio()?.blocked_count ?? 0 }}</div>
             <div class="stat-sub">{{ portfolio()?.blocked_capital | number: '1.2-2' }} CHF nicht riskiert</div>
+          </div>
+          <div class="card" [class.card-buy-gate]="buyGateActive()">
+            <h3>
+              Markt-Stimmung
+              <span class="info-icon" infoTip="CNN Fear & Greed Index (0–100): misst die allgemeine Marktstimmung anhand von 7 Faktoren wie Volatilität, Momentum und Optionsvolumen. 0 = Extreme Angst, 100 = Extreme Gier. Werte unter 40 ('Angst') aktivieren automatisch einen Kauf-Stop: die Engine öffnet dann keine neuen Positionen, weil das systemische Risiko zu hoch ist. Bestehende Positionen (Stop-Loss / Take-Profit) laufen unverändert weiter. Quelle: CNN Business / production.dataviz.cnn.io — gratis, kein API-Key nötig.">ⓘ</span>
+            </h3>
+            @if (latestFearGreedScore(); as score) {
+              <div class="stat-value" [class]="fearGreedClass(score)">{{ score }}</div>
+              <div class="stat-sub">{{ fearGreedLabel(score) }}</div>
+            } @else {
+              <div class="stat-value muted">—</div>
+              <div class="stat-sub">Noch kein Wert erfasst (ab nächstem Scan).</div>
+            }
           </div>
         <!--
           Performance metrics derived from closed trades — these are what
@@ -357,7 +378,12 @@ interface MissedOpportunityView {
             <tbody>
               @for (s of rows; track s.id) {
                 <tr [title]="s.reason">
-                  <td class="ticker" data-label="Ticker">{{ s.ticker }}</td>
+                  <td class="ticker" data-label="Ticker">
+                    {{ s.ticker }}
+                    @if (s.yf_trending) {
+                      <span class="badge badge-yf" title="Aktuell auch auf Yahoo Finance (US) als Trending gelistet — unabhängige Bestätigung, dass der Ticker gerade breit beachtet wird.">🔥 YF</span>
+                    }
+                  </td>
                   <td data-label="Typ"><span class="badge" [class]="signalTypeClass(s)">{{ signalTypeLabel(s) }}</span></td>
                   <td data-label="Preis (USD)">{{ s.price | number: '1.2-2' }}</td>
                   <td data-label="Erwähnungen">{{ s.mention_count }}</td>
@@ -994,6 +1020,21 @@ interface MissedOpportunityView {
       .badge-stock { background: #e8eef9; color: #2a5db0; }
       .badge-etf { background: #f1e8fb; color: #7c3aed; }
       .badge-unknown { background: #f0f0f0; color: #888; }
+      .badge-yf { background: #fff4e0; color: #c87800; margin-left: 5px; font-size: 0.62rem; padding: 1px 5px; }
+      /* Fear & Greed buy-gate banner */
+      .buy-gate-banner {
+        background: #fff3cd;
+        border: 1px solid #ffc107;
+        border-left: 4px solid #e67e00;
+        border-radius: 8px;
+        padding: 0.75rem 1rem;
+        margin-bottom: 1rem;
+        font-size: 0.88rem;
+        color: #5a3e00;
+        line-height: 1.5;
+      }
+      /* Highlight the F&G stat card when the gate is active */
+      .card.card-buy-gate { border-left: 3px solid #e67e00; }
       .subsection-title { margin: 18px 0 8px; font-size: 0.92rem; color: #555; font-weight: 600; }
       .hype-bar-wrap { display: flex; align-items: center; gap: 6px; }
       .hype-bar-bg { flex: 1; background: #eee; border-radius: 4px; height: 6px; min-width: 50px; }
@@ -1338,6 +1379,42 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     }
     return null;
   });
+
+  // ── CNN Fear & Greed Index (v10) ─────────────────────────────────────────
+  // Derived from balance_history, which is written on EVERY scan run (trades
+  // or not), so this stays current between trade-less scans too. The same
+  // "newest non-null" scan pattern as latestUsdChfRate above.
+  protected readonly latestFearGreedScore = computed(() => {
+    const history = this.balanceHistory();
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      const score = history[i].fear_greed_score;
+      if (score !== null && score !== undefined) return score as number;
+    }
+    return null;
+  });
+
+  // True when the buy-gate is/was active at the time of the latest scan run.
+  protected readonly buyGateActive = computed(() => {
+    const score = this.latestFearGreedScore();
+    return score !== null && score < 40;
+  });
+
+  protected fearGreedLabel(score: number): string {
+    if (score <= 25) return 'Extreme Angst (Score ≤ 25)';
+    if (score <= 40) return 'Angst — Kauf-Stop aktiv';
+    if (score <= 60) return 'Neutral';
+    if (score <= 75) return 'Gier';
+    return 'Extreme Gier (Score > 75)';
+  }
+
+  protected fearGreedClass(score: number | null): string {
+    if (score === null) return '';
+    if (score <= 25) return 'neg';
+    if (score <= 40) return 'neg';
+    if (score <= 60) return '';
+    if (score <= 75) return 'pos';
+    return 'pos';
+  }
 
   // ── Watchlist & Signale: sortable + filterable ──────────────────────────
   // Default sort = Hype-Score absteigend: die Tabelle visualisiert "Hype"
