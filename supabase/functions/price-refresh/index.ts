@@ -227,6 +227,35 @@ async function sendNtfy(
   }
 }
 
+// Persists the sent notification to `push_notifications` for the dashboard
+// Notification Center. Non-critical — called after sendNtfy(), failure never
+// interrupts the trade run. Mirrors market-scan's logNotification.
+async function logNotification(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  title: string,
+  message: string,
+  topic: string,
+  priority: number,
+  tags: string[],
+  eventType: string | null,
+  ticker: string | null,
+): Promise<void> {
+  try {
+    await supabase.from('push_notifications').insert({
+      title,
+      message,
+      topic,
+      priority,
+      tags,
+      event_type: eventType,
+      ticker,
+    });
+  } catch (err) {
+    console.warn(`push notification log failed (non-critical): ${err}`);
+  }
+}
+
 Deno.serve(async () => {
   // Skip the entire run while US exchanges are closed: no exit could be
   // executed even if one triggered, prices haven't moved since the last
@@ -353,14 +382,19 @@ Deno.serve(async () => {
         );
         if (ntfyTopic) {
           const isTp = exitReason === 'interim-take-profit';
-          await sendNtfy(
-            ntfyTopic,
-            isTp ? `✅ Take-Profit: ${position.ticker}` : `🔒 Trailing-Stop: ${position.ticker}`,
+          const ntfyTitle = isTp ? `✅ Take-Profit: ${position.ticker}` : `🔒 Trailing-Stop: ${position.ticker}`;
+          const ntfyMsg =
             `${position.shares.toFixed(2)} Stk. @ ${price.toFixed(2)} USD [Zwischen-Check]\n` +
-              `PnL: ${realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(2)} CHF` +
-              (!isTp ? `\nHöchstpreis war: ${newHigh.toFixed(2)} USD` : ''),
-            isTp ? 4 : 3,
-            isTp ? ['white_check_mark', 'money_with_wings'] : ['lock', realizedPnl >= 0 ? 'white_check_mark' : 'x'],
+            `PnL: ${realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(2)} CHF` +
+            (!isTp ? `\nHöchstpreis war: ${newHigh.toFixed(2)} USD` : '');
+          const ntfyTags = isTp
+            ? ['white_check_mark', 'money_with_wings']
+            : ['lock', realizedPnl >= 0 ? 'white_check_mark' : 'x'];
+          await sendNtfy(ntfyTopic, ntfyTitle, ntfyMsg, isTp ? 4 : 3, ntfyTags);
+          await logNotification(
+            supabase, ntfyTitle, ntfyMsg, ntfyTopic, isTp ? 4 : 3, ntfyTags,
+            isTp ? 'sell-interim-tp' : 'sell-interim-trailing-stop',
+            position.ticker,
           );
         }
       } else {

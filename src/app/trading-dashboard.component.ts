@@ -16,6 +16,7 @@ import {
   BalanceHistoryRow,
   PortfolioRow,
   PositionRow,
+  PushNotificationRow,
   SignalRow,
   TradingService,
   TransactionRow,
@@ -106,18 +107,34 @@ interface MissedOpportunityView {
             <span class="tab-count">{{ missedOpportunities().length }}</span>
           }
         </button>
-        <span
-          class="scan-freshness muted"
-          [class.scan-stale]="scanIsStale()"
-          [title]="'Der Markt-Scan läuft 4× täglich an NYSE/NASDAQ-Handelstagen (Mo–Fr): 14:30, 15:00, 17:00 und 19:00 UTC (≈ 10:30, 11:00, 13:00 und 15:00 ET). Der 14:30-Scan startet direkt bei NYSE-Eröffnung (oder kurz danach) und erfasst Overnight-Gaps und frühe Momentum-Signale. Ausserhalb der Börsenzeiten und am Wochenende läuft er bewusst nicht — ein Kauf wäre beim echten Broker ohnehin nicht ausführbar. (Markt zu) im Label ist daher normal. Eine separate Funktion prüft offene Positionen alle ~30 Min. unabhängig davon.'"
-        >
-          @if (lastScanAt(); as t) {
-            Letzter Scan: {{ t | date: 'dd.MM. HH:mm' }} ({{ scanAgeLabel() }})
-            @if (scanIsStale()) { · läuft nicht — hängengeblieben? }
-          } @else {
-            Noch kein Scan gelaufen.
-          }
-        </span>
+        <div class="tab-actions">
+          <!-- Notification bell -->
+          <button
+            type="button"
+            class="notif-bell"
+            (click)="openNotifPanel()"
+            title="Benachrichtigungen — alle gesendeten Push-Notifications der Trading-Engine"
+            aria-label="Benachrichtigungen öffnen"
+          >
+            🔔
+            @if (unreadCount() > 0) {
+              <span class="notif-badge">{{ unreadCount() > 9 ? '9+' : unreadCount() }}</span>
+            }
+          </button>
+          <!-- Scan freshness -->
+          <span
+            class="scan-freshness muted"
+            [class.scan-stale]="scanIsStale()"
+            [title]="'Der Markt-Scan läuft 4× täglich an NYSE/NASDAQ-Handelstagen (Mo–Fr): 14:30, 15:00, 17:00 und 19:00 UTC (≈ 10:30, 11:00, 13:00 und 15:00 ET). Der 14:30-Scan startet direkt bei NYSE-Eröffnung (oder kurz danach) und erfasst Overnight-Gaps und frühe Momentum-Signale. Ausserhalb der Börsenzeiten und am Wochenende läuft er bewusst nicht — ein Kauf wäre beim echten Broker ohnehin nicht ausführbar. (Markt zu) im Label ist daher normal. Eine separate Funktion prüft offene Positionen alle ~30 Min. unabhängig davon.'"
+          >
+            @if (lastScanAt(); as t) {
+              Letzter Scan: {{ t | date: 'dd.MM. HH:mm' }} ({{ scanAgeLabel() }})
+              @if (scanIsStale()) { · läuft nicht — hängengeblieben? }
+            } @else {
+              Noch kein Scan gelaufen.
+            }
+          </span>
+        </div>
       </div>
 
       <p class="muted fx-note">
@@ -936,6 +953,65 @@ interface MissedOpportunityView {
         </div>
       </div>
 
+      <!-- ── Notification Center ─────────────────────────────────────────── -->
+      @if (notifPanelOpen()) {
+        <!-- Backdrop: click-to-close, blurs background -->
+        <div class="notif-backdrop" (click)="closeNotifPanel()" aria-hidden="true"></div>
+
+        <!-- Slide-over panel -->
+        <aside class="notif-panel" role="dialog" aria-label="Benachrichtigungen" aria-modal="true">
+
+          <!-- Header -->
+          <div class="notif-panel-head">
+            <div class="notif-panel-title">
+              <span>Benachrichtigungen</span>
+              @if (pushNotifications().length > 0) {
+                <span class="notif-total-count">{{ pushNotifications().length }}</span>
+              }
+            </div>
+            <button
+              type="button"
+              class="notif-panel-close"
+              (click)="closeNotifPanel()"
+              aria-label="Panel schliessen"
+            >✕</button>
+          </div>
+
+          <!-- Empty state -->
+          @if (pushNotifications().length === 0) {
+            <div class="notif-empty">
+              <span class="notif-empty-icon">📭</span>
+              <span class="notif-empty-title">Keine Benachrichtigungen</span>
+              <span class="notif-empty-hint muted">
+                Kauf-, Take-Profit- und Trailing-Stop-Meldungen erscheinen hier sobald die
+                Engine das nächste Mal handelt.
+              </span>
+            </div>
+          } @else {
+            <!-- Scrollable feed -->
+            <div class="notif-scroll">
+              @for (group of notifGroups(); track group.label) {
+                <div class="notif-day-label">{{ group.label }}</div>
+                @for (n of group.items; track n.id) {
+                  <div class="notif-item" [class]="notifTypeClass(n)">
+                    <div class="notif-item-icon-wrap">
+                      <span class="notif-item-icon">{{ notifEmoji(n) }}</span>
+                    </div>
+                    <div class="notif-item-body">
+                      <div class="notif-item-header">
+                        <span class="notif-item-title">{{ n.title }}</span>
+                        <span class="notif-item-time muted">{{ relativeTime(n.created_at) }}</span>
+                      </div>
+                      <div class="notif-item-msg">{{ n.message }}</div>
+                    </div>
+                  </div>
+                }
+              }
+            </div>
+          }
+        </aside>
+      }
+
       <!-- SQL dialog -->
       <dialog #sqlDialog class="sql-dialog">
         <div class="sql-dialog-head">
@@ -1190,7 +1266,8 @@ interface MissedOpportunityView {
         border-radius: 20px; padding: 1px 7px;
       }
       .tab.active .tab-count { background: #ffe3d6; color: #ff4500; }
-      .scan-freshness { margin-left: auto; align-self: center; font-size: 0.72rem; white-space: nowrap; }
+      .tab-actions { margin-left: auto; display: flex; align-items: center; gap: 0.6rem; }
+      .scan-freshness { align-self: center; font-size: 0.72rem; white-space: nowrap; }
       .scan-stale { color: #d9534f; font-weight: 600; }
       .fx-note { margin: -0.5rem 0 1rem; line-height: 1.4; }
       .chart-note { margin: 0.5rem 0 0; line-height: 1.4; font-size: 0.72rem; }
@@ -1467,6 +1544,172 @@ interface MissedOpportunityView {
         border-top: 1px solid #eee; border-radius: 0 0 10px 10px;
       }
     `,
+    /* ── Notification Center ─────────────────────────────────────────────── */
+    `
+      /* Bell button — sits inside .tab-actions (right end of the tab bar) */
+      .notif-bell {
+        position: relative;
+        background: none; border: none; cursor: pointer;
+        padding: 5px 7px; border-radius: 8px;
+        font-size: 1.05rem; line-height: 1;
+        color: #555;
+        transition: background 0.15s, transform 0.12s;
+        flex-shrink: 0;
+      }
+      .notif-bell:hover  { background: #f0f0f0; transform: scale(1.1); }
+      .notif-bell:active { transform: scale(0.92); }
+
+      /* Unread count badge (red dot with number) */
+      .notif-badge {
+        position: absolute; top: -1px; right: -2px;
+        min-width: 16px; height: 16px;
+        background: #e53935; color: #fff;
+        font-size: 0.55rem; font-weight: 800;
+        border-radius: 99px; padding: 0 4px;
+        display: flex; align-items: center; justify-content: center;
+        border: 1.5px solid #fff;
+        line-height: 1; pointer-events: none;
+      }
+
+      /* ── Backdrop ─────────────────────────────────────────────────────── */
+      .notif-backdrop {
+        position: fixed; inset: 0; z-index: 1000;
+        background: rgba(10, 10, 20, 0.28);
+        backdrop-filter: blur(3px);
+        -webkit-backdrop-filter: blur(3px);
+        animation: notifFadeIn 0.22s ease;
+      }
+      @keyframes notifFadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+      /* ── Panel ────────────────────────────────────────────────────────── */
+      .notif-panel {
+        position: fixed;
+        top: 0; right: 0; bottom: 0;
+        width: 380px; max-width: 100vw;
+        z-index: 1001;
+        background: #fff;
+        display: flex; flex-direction: column;
+        box-shadow: -1px 0 0 rgba(0,0,0,0.07), -6px 0 36px rgba(0,0,0,0.13);
+        animation: notifSlideIn 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      @keyframes notifSlideIn {
+        from { transform: translateX(100%); opacity: 0.85; }
+        to   { transform: translateX(0);    opacity: 1;    }
+      }
+
+      /* Panel header */
+      .notif-panel-head {
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 1rem 1rem 0.85rem;
+        border-bottom: 1px solid #f0f0f0;
+        flex-shrink: 0;
+      }
+      .notif-panel-title {
+        display: flex; align-items: center; gap: 0.5rem;
+        font-size: 0.88rem; font-weight: 700; color: #1a1a1a;
+      }
+      .notif-total-count {
+        background: #f0f0f0; color: #666;
+        font-size: 0.63rem; font-weight: 700;
+        border-radius: 20px; padding: 2px 7px;
+      }
+      .notif-panel-close {
+        background: none; border: none; cursor: pointer;
+        font-size: 0.95rem; color: #aaa;
+        padding: 5px 7px; border-radius: 7px;
+        line-height: 1;
+        transition: background 0.12s, color 0.12s;
+      }
+      .notif-panel-close:hover { background: #f5f5f5; color: #333; }
+
+      /* ── Empty state ──────────────────────────────────────────────────── */
+      .notif-empty {
+        flex: 1; display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        gap: 0.4rem; padding: 2.5rem 1.5rem;
+        text-align: center;
+      }
+      .notif-empty-icon { font-size: 2.8rem; line-height: 1; }
+      .notif-empty-title { font-size: 0.88rem; font-weight: 600; color: #555; margin-top: 0.25rem; }
+      .notif-empty-hint { font-size: 0.76rem; line-height: 1.45; max-width: 260px; }
+
+      /* ── Scroll container ─────────────────────────────────────────────── */
+      .notif-scroll {
+        flex: 1; overflow-y: auto;
+        padding-bottom: 1.5rem;
+        /* thin custom scrollbar */
+        scrollbar-width: thin;
+        scrollbar-color: #e0e0e0 transparent;
+      }
+      .notif-scroll::-webkit-scrollbar { width: 4px; }
+      .notif-scroll::-webkit-scrollbar-track { background: transparent; }
+      .notif-scroll::-webkit-scrollbar-thumb { background: #e0e0e0; border-radius: 4px; }
+
+      /* ── Day group label ──────────────────────────────────────────────── */
+      .notif-day-label {
+        padding: 0.7rem 1rem 0.3rem;
+        font-size: 0.62rem; font-weight: 700;
+        text-transform: uppercase; letter-spacing: 0.09em; color: #bbb;
+        position: sticky; top: 0; background: #fff; z-index: 1;
+      }
+
+      /* ── Notification item ────────────────────────────────────────────── */
+      .notif-item {
+        display: flex; align-items: flex-start; gap: 0.7rem;
+        padding: 0.75rem 1rem;
+        border-left: 3px solid transparent;
+        transition: background 0.1s;
+      }
+      .notif-item:hover { background: #fafafa; }
+      /* Separator between adjacent items of same day */
+      .notif-day-label + .notif-item { border-top: none; }
+      .notif-item ~ .notif-item { border-top: 1px solid #f5f5f5; }
+
+      /* Left-border accent by event type */
+      .notif-type-buy            { border-left-color: #16a34a; }
+      .notif-type-tp             { border-left-color: #2563eb; }
+      .notif-type-interim-tp     { border-left-color: #2563eb; }
+      .notif-type-stop           { border-left-color: #d97706; }
+      .notif-type-interim-stop   { border-left-color: #d97706; }
+
+      /* Icon circle */
+      .notif-item-icon-wrap {
+        flex-shrink: 0; width: 34px; height: 34px;
+        border-radius: 50%;
+        background: #f5f5f5;
+        display: flex; align-items: center; justify-content: center;
+        font-size: 1.05rem;
+      }
+      .notif-type-buy          .notif-item-icon-wrap { background: #dcfce7; }
+      .notif-type-tp           .notif-item-icon-wrap,
+      .notif-type-interim-tp   .notif-item-icon-wrap { background: #dbeafe; }
+      .notif-type-stop         .notif-item-icon-wrap,
+      .notif-type-interim-stop .notif-item-icon-wrap { background: #fef3c7; }
+
+      /* Item content */
+      .notif-item-body { flex: 1; min-width: 0; }
+      .notif-item-header {
+        display: flex; align-items: baseline;
+        justify-content: space-between; gap: 0.5rem;
+      }
+      .notif-item-title {
+        font-size: 0.8rem; font-weight: 600; color: #111;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        flex: 1; min-width: 0;
+      }
+      .notif-item-time {
+        font-size: 0.62rem; white-space: nowrap; flex-shrink: 0;
+      }
+      .notif-item-msg {
+        font-size: 0.72rem; color: #666; margin-top: 3px;
+        white-space: pre-line; line-height: 1.45;
+      }
+
+      @media (max-width: 420px) {
+        .notif-panel { width: 100vw; }
+        .scan-freshness { display: none; }
+      }
+    `,
   ],
 })
 export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestroy {
@@ -1475,6 +1718,100 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   // Mirrors the constants in supabase/functions/market-scan/index.ts — shown
   // in the UI so it's clear at which thresholds a position would be closed.
   protected readonly activeTab = signal<'overview' | 'transactions' | 'missed' | 'analysis'>('overview');
+
+  // ── Notification Center ──────────────────────────────────────────────────
+  protected readonly pushNotifications = signal<PushNotificationRow[]>([]);
+  protected readonly notifPanelOpen = signal(false);
+
+  /** ISO timestamp of when the user last had the panel open — stored in
+   *  localStorage so unread counts survive page reloads. */
+  private static readonly NOTIF_SEEN_KEY = 'notif_last_seen_at';
+
+  private notifLastSeenAt(): Date {
+    const raw = localStorage.getItem(TradingDashboardComponent.NOTIF_SEEN_KEY);
+    // Default: 7 days ago, so freshly-arriving users see recent items as unread
+    // without seeing an enormous badge counting every historical notification.
+    if (!raw) return new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const d = new Date(raw);
+    return isNaN(d.getTime()) ? new Date(0) : d;
+  }
+
+  protected readonly unreadCount = computed(() => {
+    const lastSeen = this.notifLastSeenAt();
+    return this.pushNotifications().filter(
+      (n) => new Date(n.created_at) > lastSeen,
+    ).length;
+  });
+
+  protected openNotifPanel(): void {
+    this.notifPanelOpen.set(true);
+    // Mark everything currently loaded as "seen"
+    localStorage.setItem(TradingDashboardComponent.NOTIF_SEEN_KEY, new Date().toISOString());
+  }
+
+  protected closeNotifPanel(): void {
+    this.notifPanelOpen.set(false);
+  }
+
+  /** Groups push notifications by local calendar day for the panel feed. */
+  protected readonly notifGroups = computed(() => {
+    const items = this.pushNotifications();
+    const groups = new Map<string, PushNotificationRow[]>();
+    const now = new Date();
+    const todayStr = now.toDateString();
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    const yesterdayStr = yesterday.toDateString();
+
+    for (const n of items) {
+      const d = new Date(n.created_at);
+      let label: string;
+      if (d.toDateString() === todayStr) {
+        label = 'Heute';
+      } else if (d.toDateString() === yesterdayStr) {
+        label = 'Gestern';
+      } else {
+        label = d.toLocaleDateString('de-CH', { day: '2-digit', month: '2-digit', year: '2-digit' });
+      }
+      if (!groups.has(label)) groups.set(label, []);
+      groups.get(label)!.push(n);
+    }
+    return Array.from(groups.entries()).map(([label, notifs]) => ({ label, items: notifs }));
+  });
+
+  protected notifTypeClass(n: PushNotificationRow): string {
+    switch (n.event_type) {
+      case 'buy':                       return 'notif-item notif-type-buy';
+      case 'sell-tp':                   return 'notif-item notif-type-tp';
+      case 'sell-interim-tp':           return 'notif-item notif-type-interim-tp';
+      case 'sell-trailing-stop':        return 'notif-item notif-type-stop';
+      case 'sell-interim-trailing-stop':return 'notif-item notif-type-interim-stop';
+      default:                          return 'notif-item';
+    }
+  }
+
+  protected notifEmoji(n: PushNotificationRow): string {
+    switch (n.event_type) {
+      case 'buy':                        return '📈';
+      case 'sell-tp':
+      case 'sell-interim-tp':            return '🎯';
+      case 'sell-trailing-stop':
+      case 'sell-interim-trailing-stop': return '🔒';
+      default:                           return '🔔';
+    }
+  }
+
+  /** Human-readable relative time label for a notification timestamp. */
+  protected relativeTime(isoString: string): string {
+    const diff = Date.now() - new Date(isoString).getTime();
+    const mins = Math.floor(diff / 60_000);
+    if (mins < 2)  return 'gerade eben';
+    if (mins < 60) return `vor ${mins} Min.`;
+    const hours = Math.floor(mins / 60);
+    if (hours < 24) return `vor ${hours} Std.`;
+    const days = Math.floor(hours / 24);
+    return days === 1 ? 'gestern' : `vor ${days} Tagen`;
+  }
 
   // Mirrors the constants in both Edge Functions — see market-scan's
   // strategy-constants comment for the full reasoning. Short version: with
@@ -1828,6 +2165,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
         lastScanAt,
         verdictPerformance,
         zScorePerformance,
+        pushNotifications,
       ] = await Promise.all([
         this.trading.getPortfolio(),
         this.trading.getPositions(),
@@ -1839,6 +2177,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
         this.trading.getLastScanTime(),
         this.trading.getVerdictPerformance(),
         this.trading.getZScoreBucketPerformance(),
+        this.trading.getPushNotifications(),
       ]);
       this.portfolio.set(portfolio);
       this.positions.set(positions);
@@ -1850,6 +2189,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       this.lastScanAt.set(lastScanAt);
       this.verdictPerformance.set(verdictPerformance);
       this.zScorePerformance.set(zScorePerformance);
+      this.pushNotifications.set(pushNotifications);
 
       const latestSnapshot = balanceHistory[balanceHistory.length - 1];
       this.totalValue.set(latestSnapshot ? latestSnapshot.total_value : portfolio.cash);

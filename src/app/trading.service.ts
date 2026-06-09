@@ -186,6 +186,25 @@ export class TradingService {
     }
     return (data ?? []) as ZScoreBucketPerformanceRow[];
   }
+
+  /**
+   * All ntfy push notifications sent by the trading engine — newest first.
+   * Written by both `market-scan` and `price-refresh` after every `sendNtfy()`
+   * call (v15+). Fails soft (returns `[]`) if the v15 migration hasn't been
+   * run yet — same pattern as the v3 performance views.
+   */
+  async getPushNotifications(limit = 150): Promise<PushNotificationRow[]> {
+    const { data, error } = await this.getClient()
+      .from('push_notifications')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (error) {
+      console.warn('push_notifications nicht verfügbar (Migration v15 ausgeführt?):', error.message);
+      return [];
+    }
+    return (data ?? []) as PushNotificationRow[];
+  }
 }
 
 export interface PortfolioRow {
@@ -428,4 +447,28 @@ export interface SignalRow {
    * outperform Reddit-only ones?
    */
   finviz_news: boolean;
+}
+
+/**
+ * Row of `push_notifications` — a log of every ntfy push notification sent
+ * by the trading engine (written by both `market-scan` and `price-refresh`
+ * after each `sendNtfy()` call, v15+). Feeds the dashboard Notification Center.
+ */
+export interface PushNotificationRow {
+  id: number;
+  title: string;
+  message: string;
+  topic: string;
+  priority: number;
+  tags: string[];
+  /** Semantic type for UI colour-coding. `null` for pre-v15 rows. */
+  event_type:
+    | 'buy'
+    | 'sell-tp'
+    | 'sell-trailing-stop'
+    | 'sell-interim-tp'
+    | 'sell-interim-trailing-stop'
+    | null;
+  ticker: string | null;
+  created_at: string;
 }

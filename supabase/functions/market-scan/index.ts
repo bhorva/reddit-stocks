@@ -820,6 +820,36 @@ async function sendNtfy(
   }
 }
 
+// ── Push notification log ────────────────────────────────────────────────
+// Persists every sent notification to `push_notifications` so the dashboard
+// Notification Center can show a full history without a separate polling setup.
+// Non-critical: called AFTER sendNtfy(), failure never affects the trade run.
+async function logNotification(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  title: string,
+  message: string,
+  topic: string,
+  priority: number,
+  tags: string[],
+  eventType: string | null,
+  ticker: string | null,
+): Promise<void> {
+  try {
+    await supabase.from('push_notifications').insert({
+      title,
+      message,
+      topic,
+      priority,
+      tags,
+      event_type: eventType,
+      ticker,
+    });
+  } catch (err) {
+    console.warn(`push notification log failed (non-critical): ${err}`);
+  }
+}
+
 // ── Hype classification ──────────────────────────────────────────────────
 // Correlates FIVE independent lenses so no single noisy source can drive a
 // trade on its own: how much MORE a ticker is being mentioned than usual
@@ -1487,14 +1517,24 @@ Deno.serve(async () => {
           log.push(`${ticker}: SELL ${position.shares} @ ${price} (PnL ${realizedPnl.toFixed(2)} CHF, Gebühren ${(fee + fx).toFixed(2)} CHF inkl. FX, Grund: ${exitReason})`);
           if (ntfyTopic) {
             const isTp = exitReason === 'take-profit';
+            const ntfyTitle = isTp ? `✅ Take-Profit: ${ticker}` : `🔒 Trailing-Stop: ${ticker}`;
+            const ntfyMsg =
+              `${position.shares.toFixed(2)} Stk. @ ${price.toFixed(2)} USD\n` +
+              `PnL: ${realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(2)} CHF` +
+              (!isTp ? `\nHöchstpreis war: ${newHigh.toFixed(2)} USD` : '');
             await sendNtfy(
               ntfyTopic,
-              isTp ? `✅ Take-Profit: ${ticker}` : `🔒 Trailing-Stop: ${ticker}`,
-              `${position.shares.toFixed(2)} Stk. @ ${price.toFixed(2)} USD\n` +
-                `PnL: ${realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(2)} CHF` +
-                (!isTp ? `\nHöchstpreis war: ${newHigh.toFixed(2)} USD` : ''),
+              ntfyTitle,
+              ntfyMsg,
               isTp ? 4 : 3,
               isTp ? ['white_check_mark', 'money_with_wings'] : ['lock', realizedPnl >= 0 ? 'white_check_mark' : 'x'],
+            );
+            await logNotification(
+              supabase, ntfyTitle, ntfyMsg, ntfyTopic,
+              isTp ? 4 : 3,
+              isTp ? ['white_check_mark', 'money_with_wings'] : ['lock', realizedPnl >= 0 ? 'white_check_mark' : 'x'],
+              isTp ? 'sell-tp' : 'sell-trailing-stop',
+              ticker,
             );
           }
           continue;
@@ -1628,15 +1668,18 @@ Deno.serve(async () => {
             portfolio.trade_count += 1;
             log.push(`${ticker}: BUY ${shares.toFixed(4)} @ ${price} (Gebühren ${(fee + fx).toFixed(2)} CHF inkl. FX)`);
             if (ntfyTopic) {
-              await sendNtfy(
-                ntfyTopic,
-                `🟢 Kauf: ${ticker}`,
+              const buyTitle = `🟢 Kauf: ${ticker}`;
+              const buyMsg =
                 `${shares.toFixed(2)} Stk. @ ${price.toFixed(2)} USD\n` +
-                  `Investiert: ~${grossAmount.toFixed(0)} CHF (inkl. Gebühren)\n` +
-                  `Take-Profit bei: ${(price * (1 + TAKE_PROFIT)).toFixed(2)} USD (+${(TAKE_PROFIT * 100).toFixed(0)}%)\n` +
-                  `Stop bei: ${(price * (1 + STOP_LOSS)).toFixed(2)} USD (${(STOP_LOSS * 100).toFixed(0)}%)`,
-                4,
+                `Investiert: ~${grossAmount.toFixed(0)} CHF (inkl. Gebühren)\n` +
+                `Take-Profit bei: ${(price * (1 + TAKE_PROFIT)).toFixed(2)} USD (+${(TAKE_PROFIT * 100).toFixed(0)}%)\n` +
+                `Stop bei: ${(price * (1 + STOP_LOSS)).toFixed(2)} USD (${(STOP_LOSS * 100).toFixed(0)}%)`;
+              await sendNtfy(ntfyTopic, buyTitle, buyMsg, 4, ['green_circle', 'chart_with_upwards_trend']);
+              await logNotification(
+                supabase, buyTitle, buyMsg, ntfyTopic, 4,
                 ['green_circle', 'chart_with_upwards_trend'],
+                'buy',
+                ticker,
               );
             }
           }
