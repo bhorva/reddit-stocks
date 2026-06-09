@@ -122,6 +122,22 @@ const STOP_LOSS = -0.06; // sell once a position loses this much
 const MAX_POSITIONS = 3;
 const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 
+// ── Measure 1: Near-miss dip buffer ──────────────────────────────────────
+// A ticker sitting 3.7% below its multi-week high with full organic
+// confirmation is MORE interesting than one that just scraped -4% with weak
+// signals. Hard gates produce cliff effects: the difference between -3.99%
+// and -4.01% shouldn't be binary. Instead we open a REDUCED position for
+// dips within NEAR_DIP_BUFFER of the threshold — expressing "lower
+// conviction" via size rather than a flat rejection.
+//
+// The reduced size is upgraded back to full if the ticker has been
+// classified 'organic' in at least CONSECUTIVE_ORGANIC_THRESHOLD prior
+// scans in a row (Measure 3) — repeated confirmation is strong evidence of
+// a genuine trend, not a one-scan noise spike.
+const NEAR_DIP_BUFFER = 0.01;           // 1 pp above DIP_THRESH still qualifies
+const NEAR_MISS_POSITION_FACTOR = 0.5;  // half position for near-miss entries
+const CONSECUTIVE_ORGANIC_THRESHOLD = 2; // prior organic scans needed to upgrade to full size
+
 // Currency-conversion spread Swissquote charges when trading USD-denominated
 // stocks from a CHF-denominated account (in addition to the brokerage
 // commission below). Roughly 0.95% each way — previously NOT modelled at all,
@@ -850,6 +866,39 @@ async function logNotification(
   }
 }
 
+// ── Measure 3: Consecutive organic confirmation ──────────────────────────
+// Counts how many scans PRIOR to the current run had verdict = 'organic' for
+// this ticker in an unbroken streak. The current run's signal is already in
+// the DB (inserted above the buy check), so we skip index 0 of the result.
+//
+// Used to upgrade near-miss entries (Measure 1) from half to full position
+// size: if a ticker has been organic for 2+ consecutive scans, that's
+// sustained, multi-hour confirmation — not a single-scan noise spike.
+//
+// Returns 0 on any DB error (fail-safe: don't let a query failure prevent
+// the rest of the buy logic from running).
+// deno-lint-ignore no-explicit-any
+async function getConsecutiveOrganicCount(supabase: any, ticker: string): Promise<number> {
+  try {
+    const { data, error } = await supabase
+      .from('signals')
+      .select('verdict')
+      .eq('ticker', ticker)
+      .order('scanned_at', { ascending: false })
+      .limit(CONSECUTIVE_ORGANIC_THRESHOLD + 3);
+    if (error || !data || data.length <= 1) return 0;
+    // data[0] = the signal just inserted for THIS run → skip it.
+    let count = 0;
+    for (let i = 1; i < data.length; i++) {
+      if (data[i].verdict === 'organic') count++;
+      else break;
+    }
+    return count;
+  } catch {
+    return 0;
+  }
+}
+
 // ── Hype classification ──────────────────────────────────────────────────
 // Correlates FIVE independent lenses so no single noisy source can drive a
 // trade on its own: how much MORE a ticker is being mentioned than usual
@@ -1365,12 +1414,16 @@ Deno.serve(async () => {
       // Base buy-eligibility — everything except the capacity gate and the F&G
       // gate. Used as the shared foundation for both "skipped" flags below so
       // neither has to repeat the full condition list.
+      // Dip classification — used both for buyEligible tracking and the buy check.
+      const isFullDip  = dropFromHigh <= DIP_THRESH;
+      const isNearMiss = !isFullDip && dropFromHigh <= DIP_THRESH + NEAR_DIP_BUFFER;
+
       const buyEligible =
         marketOpen &&
         !position &&
         verdict === 'organic' &&
         instrumentInfoByTicker.get(ticker)?.isEtf !== true &&
-        dropFromHigh <= DIP_THRESH;
+        (isFullDip || isNearMiss);
 
       // `wouldHaveBought` — eligible AND F&G gate not blocking AND capacity free.
       // Used for the "Verpasste Chancen" tab (capacity-only misses).
@@ -1583,7 +1636,26 @@ Deno.serve(async () => {
         // intraday close (see above) — only the reference HIGH is long-range.
         // (`recentHigh`/`dropFromHigh` are now hoisted above, alongside
         // `position` — see the comment there for why both moved up.)
-        if (dropFromHigh <= DIP_THRESH) {
+        if (isFullDip || isNearMiss) {
+          // ── Measure 1 + 3: determine position size factor ────────────────
+          // Full dip → always full size (1.0).
+          // Near-miss → half size (0.5) unless 2+ consecutive prior scans
+          // already confirmed 'organic' for this ticker, in which case the
+          // sustained signal upgrades the entry back to full size.
+          let positionFactor = 1.0;
+          let consecutiveOrganic = 0;
+          let entryNote = '';
+          if (isNearMiss) {
+            consecutiveOrganic = await getConsecutiveOrganicCount(supabase, ticker);
+            if (consecutiveOrganic >= CONSECUTIVE_ORGANIC_THRESHOLD) {
+              positionFactor = 1.0;
+              entryNote = ` Near-Miss-Einstieg, aber volle Positionsgrösse: ${consecutiveOrganic}× in Folge organisch bestätigt.`;
+            } else {
+              positionFactor = NEAR_MISS_POSITION_FACTOR;
+              entryNote = ` Near-Miss-Einstieg (Dip ${(dropFromHigh * 100).toFixed(1)}%, Schwelle −${(Math.abs(DIP_THRESH) * 100).toFixed(0)}%) → halbe Position.`;
+            }
+          }
+
           // `cash` is CHF; open positions' mark-to-market value is computed
           // from USD prices — convert it to CHF before summing, otherwise
           // `totalValue` (and therefore the CHF `budget` derived from it)
@@ -1594,7 +1666,7 @@ Deno.serve(async () => {
             0,
           );
           const totalValue = portfolio.cash + positionsValueUsd * usdChfRate;
-          const budget = totalValue * POSITION_SIZE; // CHF — this is what we're willing to spend
+          const budget = totalValue * POSITION_SIZE * positionFactor; // CHF — scaled by conviction
           const fee = swissquoteFee(budget);
           const fx = fxFee(budget);
           const investable = budget - fee - fx; // CHF actually available to convert & invest
@@ -1630,6 +1702,10 @@ Deno.serve(async () => {
               fear_greed_score: fearGreedScore,
               yf_trending: yfTrendingSet.has(ticker),
               finviz_news: finVizNewsSet.has(ticker),
+              // Measure 1 + 3: entry confidence metadata
+              near_miss_entry: isNearMiss,
+              consecutive_organic_prior: consecutiveOrganic,
+              position_factor: positionFactor,
             };
 
             const { data: txRow } = await supabase
@@ -1645,7 +1721,7 @@ Deno.serve(async () => {
                 gross_amount: grossAmount,
                 usd_chf_rate: usdChfRate,
                 signal_snapshot: signalSnapshot,
-                reason: `Swing-Einstieg: ${(dropFromHigh * 100).toFixed(1)}% unter dem Mehrwochenhoch (${dailyHistory.length} Handelstage Historie), Hype organisch (Score ${hypeScore.toFixed(0)}, z=${zScore.toFixed(1)}) & von Stimmung/Kurs bestätigt.`,
+                reason: `Swing-Einstieg: ${(dropFromHigh * 100).toFixed(1)}% unter dem Mehrwochenhoch (${dailyHistory.length} Handelstage), Hype organisch (Score ${hypeScore.toFixed(0)}, z=${zScore.toFixed(1)}) & von Stimmung/Kurs bestätigt.${entryNote}`,
               })
               .select()
               .single();
