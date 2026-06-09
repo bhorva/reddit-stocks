@@ -1,4 +1,5 @@
 import { CommonModule } from '@angular/common';
+import { InfoTipDirective } from './info-tip.directive';
 import {
   AfterViewInit,
   Component,
@@ -64,7 +65,7 @@ interface MissedOpportunityView {
 @Component({
   selector: 'app-trading-dashboard',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, InfoTipDirective],
   template: `
     @if (!trading.configured) {
       <div class="notice">
@@ -182,7 +183,7 @@ interface MissedOpportunityView {
             </div>
           </div>
           <div class="card">
-            <h3>Hype-Blocks <span class="info-icon" tabindex="0" title="Anzahl Aktien, bei denen die Engine einen Erwähnungs-Anstieg als reinen, unbegründeten Hype eingestuft und deshalb BEWUSST NICHT gehandelt hat ('Pure-Hype'-Verdict). Das verhinderte Kapital, das damit nicht riskiert wurde, steht darunter — eine Wette, die nicht eingegangen wurde, ist hier ein Erfolg, kein verpasster Gewinn (zumindest, wenn die Klassifikation stimmt — siehe 'Lern-Insights' weiter unten).">ⓘ</span></h3>
+            <h3>Hype-Blocks <span class="info-icon" infoTip="Anzahl Aktien, bei denen die Engine einen Erwähnungs-Anstieg als reinen, unbegründeten Hype eingestuft und deshalb BEWUSST NICHT gehandelt hat ('Pure-Hype'-Verdict). Das verhinderte Kapital, das damit nicht riskiert wurde, steht darunter — eine Wette, die nicht eingegangen wurde, ist hier ein Erfolg, kein verpasster Gewinn (zumindest, wenn die Klassifikation stimmt — siehe 'Lern-Insights' weiter unten).">ⓘ</span></h3>
             <div class="stat-value neu">{{ portfolio()?.blocked_count ?? 0 }}</div>
             <div class="stat-sub">{{ portfolio()?.blocked_capital | number: '1.2-2' }} CHF nicht riskiert</div>
           </div>
@@ -196,7 +197,7 @@ interface MissedOpportunityView {
           as one wall of stats rather than fragmenting into separate grids.
         -->
           <div class="card">
-            <h3>Trefferquote <span class="info-icon" tabindex="0" title="Anteil der bereits abgeschlossenen (verkauften) Trades, die mit Gewinn endeten. Sagt für sich allein noch nichts über die Höhe von Gewinnen/Verlusten aus — siehe daneben.">ⓘ</span></h3>
+            <h3>Trefferquote <span class="info-icon" infoTip="Anteil der bereits abgeschlossenen (verkauften) Trades, die mit Gewinn endeten. Sagt für sich allein noch nichts über die Höhe von Gewinnen/Verlusten aus — siehe daneben.">ⓘ</span></h3>
             @if (winRate(); as wr) {
               <div class="stat-value" [class.pos]="wr >= 50" [class.neg]="wr < 50">{{ wr | number: '1.0-0' }}%</div>
               <div class="stat-sub">{{ winCount() }} Gewinner · {{ lossCount() }} Verlierer von {{ closedTrades().length }} geschlossenen Trades</div>
@@ -206,7 +207,7 @@ interface MissedOpportunityView {
             }
           </div>
           <div class="card">
-            <h3>Ø Gewinn / Ø Verlust <span class="info-icon" tabindex="0" title="Wie viel im Schnitt bei einem gewonnenen bzw. verlorenen Trade heraus­kommt. Wichtig im Zusammenspiel mit der Trefferquote: Eine hohe Trefferquote mit vielen kleinen Gewinnen und seltenen, riesigen Verlusten kann unterm Strich trotzdem ein Verlustgeschäft sein (und umgekehrt).">ⓘ</span></h3>
+            <h3>Ø Gewinn / Ø Verlust <span class="info-icon" infoTip="Wie viel im Schnitt bei einem gewonnenen bzw. verlorenen Trade heraus­kommt. Wichtig im Zusammenspiel mit der Trefferquote: Eine hohe Trefferquote mit vielen kleinen Gewinnen und seltenen, riesigen Verlusten kann unterm Strich trotzdem ein Verlustgeschäft sein (und umgekehrt).">ⓘ</span></h3>
             @if (avgWin() !== null || avgLoss() !== null) {
               <div class="stat-value">
                 <span class="pos">{{ avgWin() !== null ? '+' + (avgWin() | number: '1.2-2') : '–' }}</span>
@@ -221,7 +222,7 @@ interface MissedOpportunityView {
             }
           </div>
           <div class="card">
-            <h3>Max. Drawdown <span class="info-icon" tabindex="0" title="Der grösste Rückgang vom bisherigen Höchststand des Portfoliowerts bis zum darauffolgenden Tiefpunkt — zeigt, wie schmerzhaft die schlimmste bisherige Durststrecke war, selbst wenn die Gesamtbilanz am Ende positiv ausfällt. Ein Standard-Risikomass aus der Finanzwelt.">ⓘ</span></h3>
+            <h3>Max. Drawdown <span class="info-icon" infoTip="Der grösste Rückgang vom bisherigen Höchststand des Portfoliowerts bis zum darauffolgenden Tiefpunkt — zeigt, wie schmerzhaft die schlimmste bisherige Durststrecke war, selbst wenn die Gesamtbilanz am Ende positiv ausfällt. Ein Standard-Risikomass aus der Finanzwelt.">ⓘ</span></h3>
             @if (maxDrawdownPct(); as dd) {
               <div class="stat-value neg">−{{ dd | number: '1.1-1' }}%</div>
               <div class="stat-sub">grösster Rückgang vom bisherigen Höchststand des Portfoliowerts</div>
@@ -231,7 +232,7 @@ interface MissedOpportunityView {
             }
           </div>
           <div class="card">
-            <h3>Volatilität <span class="info-icon" tabindex="0" title="Standardabweichung der Schwankungen des Portfoliowerts zwischen aufeinanderfolgenden Snapshots — ein Standard-Risikomass: hohe Werte bedeuten ein 'ruppigeres' Auf und Ab auf dem Weg zum Endergebnis, niedrige Werte einen ruhigeren Verlauf. Ergänzt den Max. Drawdown (der zeigt nur den schlimmsten EINZELNEN Einbruch, nicht wie unruhig der gesamte Verlauf war).">ⓘ</span></h3>
+            <h3>Volatilität <span class="info-icon" infoTip="Standardabweichung der Schwankungen des Portfoliowerts zwischen aufeinanderfolgenden Snapshots — ein Standard-Risikomass: hohe Werte bedeuten ein 'ruppigeres' Auf und Ab auf dem Weg zum Endergebnis, niedrige Werte einen ruhigeren Verlauf. Ergänzt den Max. Drawdown (der zeigt nur den schlimmsten EINZELNEN Einbruch, nicht wie unruhig der gesamte Verlauf war).">ⓘ</span></h3>
             @if (volatilityPct(); as vol) {
               <div class="stat-value">±{{ vol | number: '1.1-1' }}%</div>
               <div class="stat-sub">Standardabweichung der Wertänderungen zwischen Snapshots</div>
@@ -241,7 +242,7 @@ interface MissedOpportunityView {
             }
           </div>
           <div class="card">
-            <h3>Ø Haltedauer <span class="info-icon" tabindex="0" title="Wie lange eine Position im Schnitt gehalten wird, bevor sie verkauft wird — egal ob durch Take-Profit, Stop-Loss oder einen Zwischen-Check. Kurze Haltedauern bei volatilen Aktien können auf 'Lärm' statt echte Trends hindeuten.">ⓘ</span></h3>
+            <h3>Ø Haltedauer <span class="info-icon" infoTip="Wie lange eine Position im Schnitt gehalten wird, bevor sie verkauft wird — egal ob durch Take-Profit, Stop-Loss oder einen Zwischen-Check. Kurze Haltedauern bei volatilen Aktien können auf 'Lärm' statt echte Trends hindeuten.">ⓘ</span></h3>
             @if (avgHoldingHours(); as h) {
               <div class="stat-value">{{ formatHoldingDuration(h) }}</div>
               <div class="stat-sub">über alle verknüpften Buy→Sell-Paare hinweg</div>
@@ -265,7 +266,7 @@ interface MissedOpportunityView {
         <div class="card">
             <h3>
               Portfolioentwicklung vs. SPY
-              <span class="info-icon" tabindex="0" title="Die blaue Linie ist der Wert unseres simulierten Portfolios über die Zeit, die gestrichelte graue Linie das gleiche Startkapital einfach im Aktienindex-Fonds SPY (S&P 500) angelegt — beide auf denselben Startwert normiert, damit der Vergleich fair ist. Die rötliche Fläche zeigt den 'Drawdown' (Abstand vom bisherigen Höchststand); Dreiecke markieren Käufe (▲) und Verkäufe (▼), grün/rot je nach Ergebnis. Liegt die blaue Linie unter der grauen, hätte ein simpler Indexfonds besser abgeschnitten als die aktive Strategie.">ⓘ</span>
+              <span class="info-icon" infoTip="Die blaue Linie ist der Wert unseres simulierten Portfolios über die Zeit, die gestrichelte graue Linie das gleiche Startkapital einfach im Aktienindex-Fonds SPY (S&P 500) angelegt — beide auf denselben Startwert normiert, damit der Vergleich fair ist. Die rötliche Fläche zeigt den 'Drawdown' (Abstand vom bisherigen Höchststand); Dreiecke markieren Käufe (▲) und Verkäufe (▼), grün/rot je nach Ergebnis. Liegt die blaue Linie unter der grauen, hätte ein simpler Indexfonds besser abgeschnitten als die aktive Strategie.">ⓘ</span>
               <button type="button" class="chart-mode-toggle" (click)="toggleChartMode()" title="Zwischen absoluten CHF-Beträgen und prozentualer Veränderung seit Start umschalten — letzteres macht 'schlägt die Strategie den Index?' direkt ablesbar, ohne im Kopf umzurechnen.">
                 {{ chartMode() === 'value' ? 'In % seit Start anzeigen' : 'In CHF anzeigen' }}
               </button>
@@ -302,7 +303,7 @@ interface MissedOpportunityView {
               } @else {
                 <h4 class="subsection-title">
                   Aktien
-                  <span class="info-icon" tabindex="0" title="Einzelaktien — die einzigen Titel, die diese Engine kauft. 'Typ: ?' bedeutet: die Klassifikation (direkt von Yahoo Finance, nicht geraten) steht für diesen Ticker noch aus und folgt automatisch beim nächsten Scan, an dem er beteiligt ist.">ⓘ</span>
+                  <span class="info-icon" infoTip="Einzelaktien — die einzigen Titel, die diese Engine kauft. 'Typ: ?' bedeutet: die Klassifikation (direkt von Yahoo Finance, nicht geraten) steht für diesen Ticker noch aus und folgt automatisch beim nächsten Scan, an dem er beteiligt ist.">ⓘ</span>
                 </h4>
                 @if (sortedStockSignals().length === 0) {
                   <p class="muted">Keine Aktien passen zum Filter „{{ signalFilter() }}“.</p>
@@ -311,7 +312,7 @@ interface MissedOpportunityView {
                 }
                 <h4 class="subsection-title">
                   ETFs
-                  <span class="info-icon" tabindex="0" title="ETFs werden hier separat ausgewiesen, aber NICHT gehandelt: die Engine verweigert den Kauf jedes Tickers, den Yahoo Finance selbst als ETF klassifiziert (instrumentType = 'ETF') — unabhängig davon, ob er zufällig die 'Organisch'-Heuristik erfüllen würde. Sie tauchen trotzdem in der Watchlist auf, weil ein paar breite Index-ETFs (SPY, QQQ, VOO) hier entdeckt wurden, BEVOR der Discovery-Filter dafür existierte; sie fallen mit der Zeit von selbst aus der aktiven Liste. Auch inhaltlich macht eine ETF-Bewertung über dieselbe Heuristik wenig Sinn — ihre Erwähnungs-Spitzen spiegeln eher die allgemeine Marktstimmung als ticker-spezifischen Hype, und SPY dient diesem Dashboard zugleich als Vergleichs-Benchmark.">ⓘ</span>
+                  <span class="info-icon" infoTip="ETFs werden hier separat ausgewiesen, aber NICHT gehandelt: die Engine verweigert den Kauf jedes Tickers, den Yahoo Finance selbst als ETF klassifiziert (instrumentType = 'ETF') — unabhängig davon, ob er zufällig die 'Organisch'-Heuristik erfüllen würde. Sie tauchen trotzdem in der Watchlist auf, weil ein paar breite Index-ETFs (SPY, QQQ, VOO) hier entdeckt wurden, BEVOR der Discovery-Filter dafür existierte; sie fallen mit der Zeit von selbst aus der aktiven Liste. Auch inhaltlich macht eine ETF-Bewertung über dieselbe Heuristik wenig Sinn — ihre Erwähnungs-Spitzen spiegeln eher die allgemeine Marktstimmung als ticker-spezifischen Hype, und SPY dient diesem Dashboard zugleich als Vergleichs-Benchmark.">ⓘ</span>
                 </h4>
                 @if (sortedEtfSignals().length === 0) {
                   <p class="muted">Aktuell keine ETFs in der Watchlist.</p>
@@ -323,7 +324,7 @@ interface MissedOpportunityView {
         </div>
 
         <ng-template #signalTable let-rows="rows">
-          <table>
+          <table class="mobile-card-table">
             <thead>
               <tr>
                 <th class="sortable" [class.sorted]="signalSortColumn() === 'ticker'" (click)="toggleSignalSort('ticker')">
@@ -331,7 +332,7 @@ interface MissedOpportunityView {
                 </th>
                 <th>
                   Typ
-                  <span class="info-icon" tabindex="0" title="Aktie/ETF, direkt von Yahoo Finance übernommen (meta.instrumentType) — keine Schätzung. '?' = für diesen Ticker noch nicht erfasst, wird beim nächsten Scan nachgetragen.">ⓘ</span>
+                  <span class="info-icon" infoTip="Aktie/ETF, direkt von Yahoo Finance übernommen (meta.instrumentType) — keine Schätzung. '?' = für diesen Ticker noch nicht erfasst, wird beim nächsten Scan nachgetragen.">ⓘ</span>
                 </th>
                 <th class="sortable" [class.sorted]="signalSortColumn() === 'price'" (click)="toggleSignalSort('price')">
                   Preis (USD) <span class="sort-indicator">{{ signalSortIndicator('price') }}</span>
@@ -341,26 +342,26 @@ interface MissedOpportunityView {
                 </th>
                 <th class="sortable" [class.sorted]="signalSortColumn() === 'hype_score'" (click)="toggleSignalSort('hype_score')">
                   Hype <span class="sort-indicator">{{ signalSortIndicator('hype_score') }}</span>
-                  <span class="info-icon" tabindex="0" title="Misst, wie ungewöhnlich oft eine Aktie GERADE JETZT in Reddit/StockTwits erwähnt wird, verglichen mit ihrem üblichen Niveau (statistischer Z-Score, auf 0–100 skaliert). Hoch = aktuell viel Gerede — sagt für sich allein noch nichts darüber aus, ob das Gerede berechtigt ist (das entscheidet erst das 'Verdict'). Standard-Sortierung dieser Tabelle: absteigend nach Hype, weil das den 'lautesten' Tickern zuerst Aufmerksamkeit gibt.">ⓘ</span>
+                  <span class="info-icon" infoTip="Misst, wie ungewöhnlich oft eine Aktie GERADE JETZT in Reddit/StockTwits erwähnt wird, verglichen mit ihrem üblichen Niveau (statistischer Z-Score, auf 0–100 skaliert). Hoch = aktuell viel Gerede — sagt für sich allein noch nichts darüber aus, ob das Gerede berechtigt ist (das entscheidet erst das 'Verdict'). Standard-Sortierung dieser Tabelle: absteigend nach Hype, weil das den 'lautesten' Tickern zuerst Aufmerksamkeit gibt.">ⓘ</span>
                 </th>
                 <th>
                   Stimmung
-                  <span class="info-icon" tabindex="0" title="Wie die breite Trading-Crowd auf StockTwits diesen Ticker GERADE JETZT einschätzt — Anteil bullish vs. bearish getaggter Nachrichten (mind. 5 nötig, sonst '–'). Dient als Korrelations-Check zum Reddit-Hype: bestätigt die breitere Masse einen Anstieg, oder wirkt er einseitig fabriziert? Der Balken ist bei 50% zentriert: wächst er nach RECHTS (grün), überwiegt Bullish-Stimmung — nach LINKS (rot), überwiegt Bearish-Stimmung. Fliesst direkt in das 'Verdict' ein (siehe dort): u. a. kann ein lauter, aber mehrheitlich bearish kommentierter Anstieg als 'Pure-Hype' geblockt werden, selbst wenn der Kurs kurzzeitig mitzieht.">ⓘ</span>
+                  <span class="info-icon" infoTip="Wie die breite Trading-Crowd auf StockTwits diesen Ticker GERADE JETZT einschätzt — Anteil bullish vs. bearish getaggter Nachrichten (mind. 5 nötig, sonst '–'). Dient als Korrelations-Check zum Reddit-Hype: bestätigt die breitere Masse einen Anstieg, oder wirkt er einseitig fabriziert? Der Balken ist bei 50% zentriert: wächst er nach RECHTS (grün), überwiegt Bullish-Stimmung — nach LINKS (rot), überwiegt Bearish-Stimmung. Fliesst direkt in das 'Verdict' ein (siehe dort): u. a. kann ein lauter, aber mehrheitlich bearish kommentierter Anstieg als 'Pure-Hype' geblockt werden, selbst wenn der Kurs kurzzeitig mitzieht.">ⓘ</span>
                 </th>
                 <th class="sortable" [class.sorted]="signalSortColumn() === 'verdict'" (click)="toggleSignalSort('verdict')">
                   Verdict <span class="sort-indicator">{{ signalSortIndicator('verdict') }}</span>
-                  <span class="info-icon" tabindex="0" title="Versucht zu unterscheiden, ob ein Erwähnungs-Anstieg von echter Kursbewegung & Stimmung begleitet wird ('Organisch' = handelbar) oder nur heisse Luft ist ('Spike' = verdächtig, wird beobachtet aber nicht gehandelt; 'Geblockt' = als reiner Hype eingestuft, kein Trade). Sortierung ordnet nach Handelbarkeit: Organisch → Spike → Geblockt.">ⓘ</span>
+                  <span class="info-icon" infoTip="Versucht zu unterscheiden, ob ein Erwähnungs-Anstieg von echter Kursbewegung & Stimmung begleitet wird ('Organisch' = handelbar) oder nur heisse Luft ist ('Spike' = verdächtig, wird beobachtet aber nicht gehandelt; 'Geblockt' = als reiner Hype eingestuft, kein Trade). Sortierung ordnet nach Handelbarkeit: Organisch → Spike → Geblockt.">ⓘ</span>
                 </th>
               </tr>
             </thead>
             <tbody>
               @for (s of rows; track s.id) {
                 <tr [title]="s.reason">
-                  <td class="ticker">{{ s.ticker }}</td>
-                  <td><span class="badge" [class]="signalTypeClass(s)">{{ signalTypeLabel(s) }}</span></td>
-                  <td>{{ s.price | number: '1.2-2' }}</td>
-                  <td>{{ s.mention_count }}</td>
-                  <td>
+                  <td class="ticker" data-label="Ticker">{{ s.ticker }}</td>
+                  <td data-label="Typ"><span class="badge" [class]="signalTypeClass(s)">{{ signalTypeLabel(s) }}</span></td>
+                  <td data-label="Preis (USD)">{{ s.price | number: '1.2-2' }}</td>
+                  <td data-label="Erwähnungen">{{ s.mention_count }}</td>
+                  <td data-label="Hype">
                     <div class="hype-bar-wrap">
                       <div class="hype-bar-bg">
                         <div
@@ -372,7 +373,7 @@ interface MissedOpportunityView {
                       <span>{{ s.hype_score | number: '1.0-0' }}</span>
                     </div>
                   </td>
-                  <td [title]="sentimentTooltip(s)">
+                  <td data-label="Stimmung" [title]="sentimentTooltip(s)">
                     @if (s.sentiment_ratio === null) {
                       <span class="sent-na">– (zu wenig Daten)</span>
                     } @else {
@@ -392,7 +393,7 @@ interface MissedOpportunityView {
                       </div>
                     }
                   </td>
-                  <td><span class="badge" [class]="verdictClass(s)">{{ verdictLabel(s) }}</span></td>
+                  <td data-label="Verdict"><span class="badge" [class]="verdictClass(s)">{{ verdictLabel(s) }}</span></td>
                 </tr>
               }
             </tbody>
@@ -403,7 +404,7 @@ interface MissedOpportunityView {
           <div class="card">
             <h3>
               Kapitalverteilung auf offene Positionen
-              <span class="info-icon" tabindex="0" title="Zeigt, wie das aktuell INVESTIERTE Kapital (nicht das gesamte Portfolio inkl. Cash) auf die offenen Positionen verteilt ist — eine grosse Schieflage hier bedeutet 'Klumpenrisiko': fällt genau dieser eine Titel, trifft es das Depot überproportional hart.">ⓘ</span>
+              <span class="info-icon" infoTip="Zeigt, wie das aktuell INVESTIERTE Kapital (nicht das gesamte Portfolio inkl. Cash) auf die offenen Positionen verteilt ist — eine grosse Schieflage hier bedeutet 'Klumpenrisiko': fällt genau dieser eine Titel, trifft es das Depot überproportional hart.">ⓘ</span>
             </h3>
             @if (positions().length === 0) {
               <p class="muted">Keine offenen Positionen — nichts zu konzentrieren.</p>
@@ -431,7 +432,7 @@ interface MissedOpportunityView {
           <div class="card">
             <h3>
               Cash vs. investiert über Zeit
-              <span class="info-icon" tabindex="0" title="Wie viel des Portfolios ist gerade als Cash 'in Wartestellung', wie viel steckt in offenen Positionen? Ein durchgehend hoher Cash-Anteil kann heissen, dass die Heuristik selten ein 'organic'-Signal findet — was bei der jetzt strengeren 5-Signale-Klassifikation durchaus erwartbar ist (siehe Lern-Insights).">ⓘ</span>
+              <span class="info-icon" infoTip="Wie viel des Portfolios ist gerade als Cash 'in Wartestellung', wie viel steckt in offenen Positionen? Ein durchgehend hoher Cash-Anteil kann heissen, dass die Heuristik selten ein 'organic'-Signal findet — was bei der jetzt strengeren 5-Signale-Klassifikation durchaus erwartbar ist (siehe Lern-Insights).">ⓘ</span>
             </h3>
             <div class="chart-wrap chart-wrap-small">
               <canvas #allocationCanvas></canvas>
@@ -501,7 +502,7 @@ interface MissedOpportunityView {
           <div class="card">
             <h3>
               Ticker-Leaderboard
-              <span class="info-icon" tabindex="0" title="Aggregiert alle ABGESCHLOSSENEN Trades pro Ticker — 'welche Aktien haben unterm Strich Geld gebracht oder gekostet, nicht nur bei ihrem besten/schlechtesten Einzeltrade?'. Sortiert nach Gesamtbeitrag zum realisierten Ergebnis: die grössten Gewinner oben, die grössten Bremsen unten.">ⓘ</span>
+              <span class="info-icon" infoTip="Aggregiert alle ABGESCHLOSSENEN Trades pro Ticker — 'welche Aktien haben unterm Strich Geld gebracht oder gekostet, nicht nur bei ihrem besten/schlechtesten Einzeltrade?'. Sortiert nach Gesamtbeitrag zum realisierten Ergebnis: die grössten Gewinner oben, die grössten Bremsen unten.">ⓘ</span>
             </h3>
             @if (tickerLeaderboard().length === 0) {
               <p class="muted">Noch keine abgeschlossenen Trades — die Rangliste füllt sich automatisch, sobald die ersten Positionen verkauft wurden.</p>
@@ -544,11 +545,7 @@ interface MissedOpportunityView {
           <div class="card">
             <h3>
               Lern-Insights: Treffen unsere Heuristiken zu?
-              <span
-                class="info-icon"
-                tabindex="0"
-                title="Diese Tabellen vergleichen, was die Engine beim Kauf über eine Aktie 'dachte' (Verdict, Hype-/Z-Score) mit dem tatsächlichen Ergebnis des Trades. So lässt sich nachvollziehen, ob die Klassifikations-Schwellenwerte sinnvoll sind oder angepasst werden sollten — datenbasiert statt aus dem Bauch heraus."
-              >ⓘ</span>
+              <span class="info-icon" infoTip="Diese Tabellen vergleichen, was die Engine beim Kauf über eine Aktie 'dachte' (Verdict, Hype-/Z-Score) mit dem tatsächlichen Ergebnis des Trades. So lässt sich nachvollziehen, ob die Klassifikations-Schwellenwerte sinnvoll sind oder angepasst werden sollten — datenbasiert statt aus dem Bauch heraus.">ⓘ</span>
             </h3>
             @if (verdictPerformance().length === 0 && zScorePerformance().length === 0) {
               <p class="muted">
@@ -563,7 +560,7 @@ interface MissedOpportunityView {
                 <div class="insights-block">
                   <h4>
                     Nach Verdict (Organisch / Spike / Pure-Hype)
-                    <span class="info-icon" tabindex="0" title="Die Engine stuft jede Aktie beim Scan als 'organisch' (handelbar), 'spike' (verdächtig, wird nur beobachtet) oder 'pure-hype' (blockiert) ein. Hier siehst du, ob diese Einschätzung beim jeweiligen Trade auch tatsächlich gestimmt hat.">ⓘ</span>
+                    <span class="info-icon" infoTip="Die Engine stuft jede Aktie beim Scan als 'organisch' (handelbar), 'spike' (verdächtig, wird nur beobachtet) oder 'pure-hype' (blockiert) ein. Hier siehst du, ob diese Einschätzung beim jeweiligen Trade auch tatsächlich gestimmt hat.">ⓘ</span>
                   </h4>
                   <table class="insights-table">
                     <thead>
@@ -600,7 +597,7 @@ interface MissedOpportunityView {
                 <div class="insights-block">
                   <h4>
                     Nach Stärke des Erwähnungs-Spikes (Z-Score)
-                    <span class="info-icon" tabindex="0" title="Der Z-Score misst, wie ungewöhnlich die Erwähnungszahl einer Aktie gerade verglichen mit ihrem üblichen Niveau ist (z.B. z=3 bedeutet 'dreimal so weit vom Durchschnitt entfernt wie normal'). Hier zeigt sich, ob besonders starke Spikes eher gute oder eher schlechte Trades waren — also ob 'viral' eher früh-Signal oder später Hype-Gipfel ist.">ⓘ</span>
+                    <span class="info-icon" infoTip="Der Z-Score misst, wie ungewöhnlich die Erwähnungszahl einer Aktie gerade verglichen mit ihrem üblichen Niveau ist (z.B. z=3 bedeutet 'dreimal so weit vom Durchschnitt entfernt wie normal'). Hier zeigt sich, ob besonders starke Spikes eher gute oder eher schlechte Trades waren — also ob 'viral' eher früh-Signal oder später Hype-Gipfel ist.">ⓘ</span>
                   </h4>
                   <table class="insights-table">
                     <thead>
@@ -636,7 +633,7 @@ interface MissedOpportunityView {
                 <div class="insights-block">
                   <h4>
                     Entwicklung über Zeit: Werden wir besser?
-                    <span class="info-icon" tabindex="0" title="Vergleicht die Trefferquote pro Verdict zwischen der chronologisch ersten und zweiten Hälfte aller verknüpften, abgeschlossenen Trades. Bewusst nur zwei grobe Zeit-Buckets statt einer geglätteten Trendlinie — bei den realistisch niedrigen Trade-Volumina dieser Strategie wäre eine glatte Kurve grösstenteils Rauschen, das wie ein Signal aussieht.">ⓘ</span>
+                    <span class="info-icon" infoTip="Vergleicht die Trefferquote pro Verdict zwischen der chronologisch ersten und zweiten Hälfte aller verknüpften, abgeschlossenen Trades. Bewusst nur zwei grobe Zeit-Buckets statt einer geglätteten Trendlinie — bei den realistisch niedrigen Trade-Volumina dieser Strategie wäre eine glatte Kurve grösstenteils Rauschen, das wie ein Signal aussieht.">ⓘ</span>
                   </h4>
                   <table class="insights-table">
                     <thead>
@@ -814,10 +811,7 @@ interface MissedOpportunityView {
         <div class="card">
           <h3>
             Verpasste Chancen
-            <span
-              class="info-icon"
-              tabindex="0"
-              title="Hier landen Ticker, bei denen die Heuristik kaufen wollte — organischer Hype, Kurs ausreichend unter dem Mehrwochenhoch gefallen, Markt offen, noch keine eigene Position — aber alle 3 Positions-Plätze (MAX_POSITIONS) bereits belegt waren. Das ist die EINZIGE 'nicht gekauft'-Situation, die wirklich 'das System wollte handeln, konnte aber nicht' bedeutet (im Unterschied zu 'die Heuristik selbst sagte nein', was eine ganz andere Frage testet). Die Spalte 'Veränderung seither' vergleicht den Kurs von damals rein informativ mit dem aktuellsten bekannten Kurs aus der Watchlist — KEINE simulierte Performance-Bewertung mit Gebühren/FX/Take-Profit-Logik: eine pfadgetreue Simulation bräuchte praktisch eine zweite Handels-Engine, deren Ergebnisse bei der aktuellen Datenmenge ohnehin mit Vorsicht zu geniessen wären. Diese Tabelle überlässt die Interpretation bewusst dem menschlichen Auge.">ⓘ</span>
+            <span class="info-icon" infoTip="Hier landen Ticker, bei denen die Heuristik kaufen wollte — organischer Hype, Kurs ausreichend unter dem Mehrwochenhoch gefallen, Markt offen, noch keine eigene Position — aber alle 3 Positions-Plätze (MAX_POSITIONS) bereits belegt waren. Das ist die EINZIGE 'nicht gekauft'-Situation, die wirklich 'das System wollte handeln, konnte aber nicht' bedeutet (im Unterschied zu 'die Heuristik selbst sagte nein', was eine ganz andere Frage testet). Die Spalte 'Veränderung seither' vergleicht den Kurs von damals rein informativ mit dem aktuellsten bekannten Kurs aus der Watchlist — KEINE simulierte Performance-Bewertung mit Gebühren/FX/Take-Profit-Logik: eine pfadgetreue Simulation bräuchte praktisch eine zweite Handels-Engine, deren Ergebnisse bei der aktuellen Datenmenge ohnehin mit Vorsicht zu geniessen wären. Diese Tabelle überlässt die Interpretation bewusst dem menschlichen Auge.">ⓘ</span>
           </h3>
           @if (missedOpportunities().length === 0) {
             <p class="muted">
@@ -855,12 +849,12 @@ interface MissedOpportunityView {
                       <th>Kurs damals (USD)</th>
                       <th>
                         Dip
-                        <span class="info-icon" tabindex="0" title="Wie weit der Kurs zu diesem Zeitpunkt unter seinem Mehrwochenhoch lag — die Schwelle, ab der ein Swing-Einstieg überhaupt in Frage kommt (DIP_THRESH).">ⓘ</span>
+                        <span class="info-icon" infoTip="Wie weit der Kurs zu diesem Zeitpunkt unter seinem Mehrwochenhoch lag — die Schwelle, ab der ein Swing-Einstieg überhaupt in Frage kommt (DIP_THRESH).">ⓘ</span>
                       </th>
                       <th>Hype</th>
                       <th>
                         Veränderung seither
-                        <span class="info-icon" tabindex="0" title="Rein informativer Vergleich mit dem aktuellsten bekannten Kurs aus der Watchlist — KEINE simulierte Trade-Performance (keine Gebühren, kein FX, keine Take-Profit/Stop-Loss-Logik). 'noch zu früh' = dieser Eintrag ist selbst der aktuellste bekannte Kurs für diesen Ticker. 'nicht mehr beobachtet' = der Ticker steht nicht mehr auf der aktiven Watchlist.">ⓘ</span>
+                        <span class="info-icon" infoTip="Rein informativer Vergleich mit dem aktuellsten bekannten Kurs aus der Watchlist — KEINE simulierte Trade-Performance (keine Gebühren, kein FX, keine Take-Profit/Stop-Loss-Logik). 'noch zu früh' = dieser Eintrag ist selbst der aktuellste bekannte Kurs für diesen Ticker. 'nicht mehr beobachtet' = der Ticker steht nicht mehr auf der aktiven Watchlist.">ⓘ</span>
                       </th>
                       <th>Begründung</th>
                     </tr>
@@ -1167,6 +1161,100 @@ interface MissedOpportunityView {
       .csv-export-btn:hover { background: #fff1ea; color: #ff4500; border-color: #ffd0b8; }
       @media (max-width: 600px) {
         .tx-toolbar { flex-direction: column; align-items: stretch; }
+      }
+
+      /* ═══════════════════════════════════════════════════════════════════
+         MOBILE (≤ 640 px) — responsive layout, card tables, smaller chrome
+         ═══════════════════════════════════════════════════════════════════ */
+      @media (max-width: 640px) {
+
+        /* ── Grids ── */
+        .grid-stats, .grid-mid, .grid-bot, .grid-mid-reverse {
+          grid-template-columns: 1fr;
+        }
+
+        /* ── Charts: shorter on small screens ── */
+        .chart-wrap { height: 200px; }
+        .chart-wrap-small { height: 160px; }
+
+        /* ── Chart mode toggle: shrink and wrap below title ── */
+        .chart-mode-toggle { margin-left: 0; font-size: 0.68rem; padding: 3px 10px; }
+
+        /* ── Tab bar: scrollable, don't wrap ── */
+        .tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
+        .tab { flex-shrink: 0; padding: 0.5rem 0.7rem; font-size: 0.78rem; }
+        .scan-freshness { display: none; } /* too long for narrow tab bar */
+
+        /* ── Card padding ── */
+        .card { padding: 0.75rem; }
+        .card h3 { font-size: 0.7rem; }
+
+        /* ── Stat values ── */
+        .stat-value { font-size: 1.15rem; }
+
+        /* ── Table card layout for .mobile-card-table ───────────────────────
+           Each <tr> becomes a standalone card; <thead> hides; each <td>
+           renders as a label: value row using the data-label attribute.
+           The Ticker cell (first cell) acts as the card title — full width,
+           no label pseudo-element, slightly larger. ── */
+        .mobile-card-table thead { display: none; }
+        .mobile-card-table tr {
+          display: block;
+          border: 1px solid #e8e8e8;
+          border-radius: 8px;
+          margin-bottom: 0.6rem;
+          padding: 0.5rem 0.75rem;
+          background: #fff;
+        }
+        .mobile-card-table tr:last-child { margin-bottom: 0; }
+        .mobile-card-table td {
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+          gap: 0.5rem;
+          border-bottom: 1px solid #f4f4f4;
+          padding: 5px 0;
+          font-size: 0.8rem;
+        }
+        .mobile-card-table td:last-child { border-bottom: none; }
+        .mobile-card-table td::before {
+          content: attr(data-label);
+          font-size: 0.68rem;
+          font-weight: 600;
+          color: #aaa;
+          text-transform: uppercase;
+          letter-spacing: 0.05em;
+          flex-shrink: 0;
+          white-space: nowrap;
+        }
+        /* Ticker cell: full-width title row, no label, bigger text */
+        .mobile-card-table td.ticker {
+          display: block;
+          font-size: 1rem;
+          border-bottom: 1px solid #ebebeb;
+          padding: 0 0 6px;
+          margin-bottom: 2px;
+        }
+        .mobile-card-table td.ticker::before { display: none; }
+        /* Bars take available width on mobile */
+        .mobile-card-table .hype-bar-wrap,
+        .mobile-card-table .sent-wrap { width: 100%; justify-content: flex-start; }
+        .mobile-card-table .hype-bar-bg,
+        .mobile-card-table .sent-track { min-width: 60px; }
+
+        /* ── Transaction table: horizontal scroll (too many cols for cards) ── */
+        .tx-table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        .tx-table { min-width: 700px; }
+
+        /* ── Section title ── */
+        .section-title { font-size: 1.1rem; }
+      }
+
+      /* ── Very narrow (≤ 400 px): further tighten ── */
+      @media (max-width: 400px) {
+        .card { padding: 0.6rem; }
+        .stat-value { font-size: 1rem; }
+        .tab { padding: 0.45rem 0.55rem; font-size: 0.72rem; }
       }
     `,
   ],

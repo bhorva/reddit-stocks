@@ -58,6 +58,10 @@ import { TradingDashboardComponent } from './trading-dashboard.component';
         padding: 2rem 1.5rem;
         font-family: system-ui, -apple-system, sans-serif;
       }
+      @media (max-width: 640px) {
+        .container { padding: 1rem 0.75rem; }
+        h1 { font-size: 1.3rem; }
+      }
       .title-row {
         display: flex;
         align-items: baseline;
