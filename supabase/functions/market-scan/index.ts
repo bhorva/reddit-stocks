@@ -137,6 +137,14 @@ const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 const NEAR_DIP_BUFFER = 0.01;            // 1 pp above DIP_THRESH qualifies — but only with streak confirmation
 const CONSECUTIVE_ORGANIC_THRESHOLD = 2; // min consecutive prior organic scans required for a near-miss buy
 
+// After any sell (take-profit OR stop-loss), the engine won't re-enter the
+// same ticker for this many milliseconds. Prevents immediately buying back a
+// position that was just stopped out — a classic "fighting the tape" pattern
+// that ignores the trend signal the stop itself provided.
+// 4 hours ≈ 2–3 scan slots: sold at 14:30 → blocked at 15:00 + 17:00 →
+// eligible again at 19:00. Long enough to see if the selling pressure abates.
+const SELL_COOLDOWN_MS = 4 * 60 * 60 * 1000;
+
 // Currency-conversion spread Swissquote charges when trading USD-denominated
 // stocks from a CHF-denominated account (in addition to the brokerage
 // commission below). Roughly 0.95% each way — previously NOT modelled at all,
@@ -1537,6 +1545,21 @@ Deno.serve(async () => {
           const exitReason: 'take-profit' | 'trailing-stop' =
             changePct >= TAKE_PROFIT ? 'take-profit' : 'trailing-stop';
 
+          // ── Race-condition guard ─────────────────────────────────────────
+          // DELETE first (atomic DB operation), then INSERT the transaction.
+          // If price-refresh fired at the same second and already claimed this
+          // row, `deleted` is empty → skip to avoid a phantom double-sell.
+          const { data: deleted } = await supabase
+            .from('positions')
+            .delete()
+            .eq('id', position.id)
+            .select('id');
+          if (!deleted || deleted.length === 0) {
+            log.push(`${ticker}: Position bereits von price-refresh verkauft — übersprungen.`);
+            positions.splice(positions.indexOf(position), 1);
+            continue;
+          }
+
           await supabase.from('transactions').insert({
             ticker,
             action: 'sell',
@@ -1559,7 +1582,6 @@ Deno.serve(async () => {
                 : `Trailing-Stop ausgelöst: Kurs ${price.toFixed(2)} USD gefallen auf ≤ ${trailingStopPrice.toFixed(2)} USD ` +
                   `(${Math.abs(STOP_LOSS * 100)}% unter Hoch von ${newHigh.toFixed(2)} USD; Einstieg ${position.entry_price.toFixed(2)} USD).`,
           });
-          await supabase.from('positions').delete().eq('id', position.id);
           positions.splice(positions.indexOf(position), 1);
 
           portfolio.cash += proceeds;
@@ -1636,6 +1658,26 @@ Deno.serve(async () => {
         // (`recentHigh`/`dropFromHigh` are now hoisted above, alongside
         // `position` — see the comment there for why both moved up.)
         if (isFullDip || isNearMiss) {
+          // ── Sell-cooldown check ──────────────────────────────────────────
+          // Don't re-enter a ticker that was sold within the last 4 hours.
+          // A stop-loss (or take-profit that reversed) signals the trend is
+          // against us — buying back immediately is "fighting the tape."
+          const cooldownSince = new Date(Date.now() - SELL_COOLDOWN_MS).toISOString();
+          const { data: recentSell } = await supabase
+            .from('transactions')
+            .select('created_at, exit_reason')
+            .eq('ticker', ticker)
+            .eq('action', 'sell')
+            .gte('created_at', cooldownSince)
+            .limit(1);
+          if (recentSell && recentSell.length > 0) {
+            log.push(
+              `${ticker}: Cooldown aktiv (letzte Transaktion: ${recentSell[0].exit_reason ?? 'sell'} ` +
+              `um ${new Date(recentSell[0].created_at).toISOString()}) — kein Wiedereinstieg für ${SELL_COOLDOWN_MS / 36e5}h.`
+            );
+            continue;
+          }
+
           // ── Measure 1 + 3: near-miss only buys with confirmed trend ─────
           // Full dip → always buy (full size).
           // Near-miss → only buy if 2+ consecutive prior organic scans

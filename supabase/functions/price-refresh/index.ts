@@ -347,6 +347,22 @@ Deno.serve(async () => {
         const exitReason: 'interim-take-profit' | 'interim-trailing-stop' =
           changePct >= TAKE_PROFIT ? 'interim-take-profit' : 'interim-trailing-stop';
 
+        // ── Race-condition guard ───────────────────────────────────────────
+        // DELETE first (atomic), then INSERT the transaction. If market-scan
+        // fired at the same second and already deleted this row, `deleted` is
+        // empty and we skip — avoiding a phantom double-sell in the log.
+        const { data: deleted } = await supabase
+          .from('positions')
+          .delete()
+          .eq('id', position.id)
+          .select('id');
+        if (!deleted || deleted.length === 0) {
+          log.push(`${position.ticker}: Position bereits von market-scan verkauft — übersprungen.`);
+          positions.splice(positions.indexOf(position), 1);
+          latestPrices.delete(position.ticker);
+          continue;
+        }
+
         await supabase.from('transactions').insert({
           ticker: position.ticker,
           action: 'sell',
@@ -368,7 +384,6 @@ Deno.serve(async () => {
               : `[Zwischen-Check] Trailing-Stop ausgelöst: Kurs ${price.toFixed(2)} USD ≤ Stopkurs ${trailingStopPrice.toFixed(2)} USD ` +
                 `(${Math.abs(STOP_LOSS * 100)}% unter Hoch ${newHigh.toFixed(2)} USD; Einstieg ${position.entry_price.toFixed(2)} USD).`,
         });
-        await supabase.from('positions').delete().eq('id', position.id);
         positions.splice(positions.indexOf(position), 1);
         latestPrices.delete(position.ticker);
 
