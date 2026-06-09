@@ -1530,6 +1530,21 @@ Deno.serve(async () => {
           position.high_since_entry = newHigh;
         }
 
+        // v17: persist the two inputs price-refresh needs to apply the SAME
+        // verdict-aware trailing stop between 6h scans — the multi-week high
+        // (so it can recompute dropFromHigh from its own fresh price) and this
+        // scan's verdict. Separate, best-effort write: if the v17 columns
+        // aren't migrated yet this errors harmlessly (logged, not thrown) and
+        // price-refresh just falls back to TP+hard-stop-only. Unconditional
+        // (not gated on a new high) so the verdict stays fresh every scan.
+        const { error: metaErr } = await supabase
+          .from('positions')
+          .update({ recent_high: recentHigh, last_verdict: verdict })
+          .eq('id', position.id);
+        if (metaErr) {
+          log.push(`${ticker}: Positions-Meta (recent_high/last_verdict, v17) nicht gespeichert — Migration ausstehend? ${metaErr.message}`);
+        }
+
         const changePct = (price - position.entry_price) / position.entry_price;
         const trailingStopPrice = newHigh * (1 + STOP_LOSS); // e.g. newHigh × 0.94
 
