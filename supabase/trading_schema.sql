@@ -152,6 +152,32 @@ create policy "Public read access" on public.balance_history for select using (t
 --    (Project Settings -> Vault), then schedule the job. Replace the
 --    placeholders below with your actual project ref and run once:
 --
+-- TWO pg_cron jobs are needed (mixed :00/:30 minutes can't be one expression):
+--
+-- Job 1 — market open scan (14:30 UTC):
+--   EDT (UTC−4, Mar–Nov): 14:30 UTC = 10:30 ET  ← 1h after open, post-gap clarity
+--   EST (UTC−5, Nov–Mar): 14:30 UTC = 09:30 ET  ← exactly at open
+--   14:30 UTC is the earliest time that is ALWAYS at-or-after market open
+--   regardless of which side of the DST switch we're on. Earlier than this
+--   would fire before the NYSE bell in winter.
+--
+--      select cron.schedule(
+--        'market-scan-at-open',
+--        '30 14 * * 1-5',
+--        $$
+--        select net.http_post(
+--          url     := 'https://YOUR-PROJECT-REF.supabase.co/functions/v1/market-scan',
+--          headers := jsonb_build_object(
+--            'Content-Type',  'application/json',
+--            'Authorization', 'Bearer ' || (select decrypted_secret from vault.decrypted_secrets where name = 'service_role_key')
+--          ),
+--          body    := '{}'::jsonb
+--        );
+--        $$
+--      );
+--
+-- Job 2 — three intraday scans (15:00 / 17:00 / 19:00 UTC):
+--
 --      select cron.schedule(
 --        'market-scan-during-trading-hours',
 --        '0 15,17,19 * * 1-5',
@@ -167,42 +193,31 @@ create policy "Public read access" on public.balance_history for select using (t
 --        $$
 --      );
 --
--- WHY '0 15,17,19 * * 1-5' (15:00 / 17:00 / 19:00 UTC, Mon-Fri) and not the
--- earlier round-the-clock '0 */6 * * *':
+-- Combined schedule: 14:30 / 15:00 / 17:00 / 19:00 UTC (Mon–Fri) = 4 scans/day.
+-- EDT coverage: 10:30 / 11:00 / 13:00 / 15:00 ET
+-- EST coverage: 09:30 / 10:00 / 12:00 / 14:00 ET
 --
---   NYSE/NASDAQ regular hours are 09:30-16:00 America/New_York, which — across
---   the EDT/EST daylight-saving switch — lands somewhere in 13:30-21:00 UTC.
---   The OLD schedule (00:00/06:00/12:00/18:00 UTC, every day) put only ONE of
---   its four daily runs inside that window; the other three (and EVERY weekend
---   run) could only log signals — `isUsMarketOpen` would refuse to let them
---   buy or sell, exactly like a real Swissquote account couldn't fill a
---   US-equity order outside the exchange's session either (see that function's
---   comment for the full reasoning).
+-- WHY these four times?
 --
---   13:30-21:00 (EDT) ∩ 14:30-21:00 (EST) = 14:30-21:00 UTC is the overlap
---   that's open REGARDLESS of which side of the DST switch you're on — no
---   need to hand-roll the twice-yearly offset change (the "honestly disclosed
---   simplification" `isUsMarketOpen` already favours over a brittle one).
---   15:00/17:00/19:00 UTC sits squarely inside that overlap year-round, and
---   skipping weekends outright (`1-5`) drops runs that could never do
---   anything but log "markets closed" anyway.
+--   NYSE/NASDAQ regular hours are 09:30-16:00 America/New_York. Across the
+--   EDT/EST daylight-saving switch that maps to 13:30-21:00 UTC (EDT) and
+--   14:30-21:00 UTC (EST). The intersection — times that are ALWAYS within the
+--   session regardless of DST — is 14:30-21:00 UTC. All four scheduled times
+--   sit squarely inside that window year-round.
 --
---   Net effect: every single scan can now actually act on what it finds —
---   and a missed buy candidate reappears on the very next run at most ~2h
---   later (always same trading day), instead of potentially many hours, or an
---   entire closed weekend, away. See the buy-check's comment in
---   market-scan/index.ts for why that "it just reappears soon" approach beats
---   queuing orders to fill at the next open: a multi-day-stale signal filled
---   at a much-later price would be exactly the kind of noise this schedule
---   change avoids by making "soon" actually mean soon.
+--   The 14:30 UTC open scan is new (added alongside this comment). It captures:
+--     • Gap-up/gap-down reactions to overnight news
+--     • Pre-market Reddit chatter that built up since yesterday's close
+--     • Early momentum that the previous schedule missed entirely for up to
+--       90 minutes after NYSE opened (= the biggest signal window of the day)
 --
---   (`HISTORY_LOOKBACK` in market-scan/index.ts was lowered from 28 to 15 to
---   match — at 3 scans × 5 trading days/week, 15 rows is the new "~1 week of
---   samples", preserving the original baseline-horizon intent rather than
---   silently drifting to ~1.9 weeks as a side effect of this change.)
+--   (`HISTORY_LOOKBACK` in market-scan/index.ts was raised from 15 to 20 to
+--   match — at 4 scans × 5 trading days/week, 20 rows = ~1 trading week of
+--   samples, preserving the original baseline-horizon intent.)
 --
--- To inspect or remove the schedule later:
+-- To inspect or remove the schedules later:
 --      select * from cron.job;
+--      select cron.unschedule('market-scan-at-open');
 --      select cron.unschedule('market-scan-during-trading-hours');
 
 -- ── Cron #2: keep the portfolio value current between full scans ─────────

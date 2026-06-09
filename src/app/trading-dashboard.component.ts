@@ -88,6 +88,15 @@ interface MissedOpportunityView {
         <button
           type="button"
           class="tab"
+          [class.active]="activeTab() === 'analysis'"
+          (click)="activeTab.set('analysis')"
+          title="Vordefinierte SQL-Analysen über alle abgeschlossenen Trades — Trefferquote, Trailing Stop, Ticker-Leaderboard, Fear &amp; Greed Einfluss und mehr. Jede Analyse mit automatischer Einschätzung auf Basis der Zahlen."
+        >
+          Analysen
+        </button>
+        <button
+          type="button"
+          class="tab"
           [class.active]="activeTab() === 'missed'"
           (click)="activeTab.set('missed')"
           title="Fälle, in denen die Heuristik kaufen wollte (organischer Hype, Kurs ausreichend unter dem Mehrwochenhoch, Markt offen, keine bestehende Position) — aber alle 3 Positions-Plätze bereits belegt waren. Zeigt rein deskriptiv, was der Kurs seither gemacht hat; keine simulierte Performance-Bewertung (siehe Tab-Inhalt für die ausführliche Begründung, warum bewusst so und nicht als automatisierte Gegen-P&L-Simulation)."
@@ -100,7 +109,7 @@ interface MissedOpportunityView {
         <span
           class="scan-freshness muted"
           [class.scan-stale]="scanIsStale()"
-          [title]="'Der Markt-Scan läuft 3× täglich an NYSE/NASDAQ-Handelstagen (Mo–Fr): 15:00, 17:00 und 19:00 UTC (≈ 11:00, 13:00 und 15:00 ET). Ausserhalb der Börsenzeiten und am Wochenende läuft er bewusst nicht — ein Kauf wäre beim echten Broker ohnehin nicht ausführbar. (Markt zu) im Label ist daher normal. Eine separate Funktion prüft offene Positionen alle ~30 Min. unabhängig davon.'"
+          [title]="'Der Markt-Scan läuft 4× täglich an NYSE/NASDAQ-Handelstagen (Mo–Fr): 14:30, 15:00, 17:00 und 19:00 UTC (≈ 10:30, 11:00, 13:00 und 15:00 ET). Der 14:30-Scan startet direkt bei NYSE-Eröffnung (oder kurz danach) und erfasst Overnight-Gaps und frühe Momentum-Signale. Ausserhalb der Börsenzeiten und am Wochenende läuft er bewusst nicht — ein Kauf wäre beim echten Broker ohnehin nicht ausführbar. (Markt zu) im Label ist daher normal. Eine separate Funktion prüft offene Positionen alle ~30 Min. unabhängig davon.'"
         >
           @if (lastScanAt(); as t) {
             Letzter Scan: {{ t | date: 'dd.MM. HH:mm' }} ({{ scanAgeLabel() }})
@@ -504,18 +513,40 @@ interface MissedOpportunityView {
                       <span [class.pos]="positionView(p).unrealized! >= 0" [class.neg]="positionView(p).unrealized! < 0">{{ positionView(p).unrealized | number: '1.2-2' }} CHF</span>
                     }
                   </div>
+                  <div class="pos-detail pos-trailing-info">
+                    @if (positionView(p).trailingStopPctFromEntry > 0) {
+                      <span class="pos-trailing-locked" title="Der Trailing Stop ist hochgewandert und liegt jetzt über dem Einstiegspreis — ein Exit wäre jetzt profitabel.">
+                        🔒 Stop gesichert bei {{ positionView(p).trailingStopPrice | number: '1.2-2' }} USD
+                        (+{{ positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1' }}% über Einstieg)
+                      </span>
+                    } @else {
+                      <span class="muted">
+                        Trailing Stop bei {{ positionView(p).trailingStopPrice | number: '1.2-2' }} USD
+                        ({{ positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1' }}% ab Einstieg)
+                        @if (positionView(p).highSinceEntry > p.entry_price) {
+                          · Hoch {{ positionView(p).highSinceEntry | number: '1.2-2' }} USD
+                        }
+                      </span>
+                    }
+                    @if (positionView(p).distanceToStop !== null) {
+                      <span class="muted"> · Abstand zum Stop: {{ positionView(p).distanceToStop! * 100 | number: '1.1-1' }}%</span>
+                    }
+                  </div>
                   @if (positionView(p).changePct !== null) {
-                    <div class="exit-bar-wrap" title="Position zwischen Stop-Loss ({{ stopLoss * 100 }}%) und Take-Profit (+{{ takeProfit * 100 }}%)">
+                    <div class="exit-bar-wrap"
+                         [title]="'Trailing Stop aktuell bei ' + (positionView(p).trailingStopPrice | number: '1.2-2') + ' USD (' + (positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1') + '% ab Einstieg). Take-Profit +' + (takeProfit * 100) + '% ab Einstieg.'">
                       <div class="exit-bar-bg">
                         <div class="exit-bar-zero"></div>
                         <div
                           class="exit-bar-marker"
-                          [style.left.%]="exitBarPosition(positionView(p).changePct!)"
+                          [style.left.%]="exitBarPosition(positionView(p).changePct!, positionView(p).trailingStopPctFromEntry)"
                           [style.background]="positionView(p).changePct! >= 0 ? '#1a8a3c' : '#c0392b'"
                         ></div>
                       </div>
                       <div class="exit-bar-labels">
-                        <span>Stop {{ stopLoss * 100 }}%</span>
+                        <span [class.pos]="positionView(p).trailingStopPctFromEntry > 0">
+                          Stop {{ positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1' }}%
+                        </span>
                         <span>Take-Profit +{{ takeProfit * 100 }}%</span>
                       </div>
                     </div>
@@ -836,6 +867,85 @@ interface MissedOpportunityView {
         durch reines Verknüpfen mit den ohnehin geladenen aktuellen
         Watchlist-Signalen, ohne zusätzliche API-Aufrufe oder Cron-Jobs.
       -->
+      <!-- ── Analysen-Tab ───────────────────────────────────────────────── -->
+      <div [hidden]="activeTab() !== 'analysis'" class="tx-wide">
+        <div class="card">
+          <h3>Analysen</h3>
+
+          <!-- Query selector -->
+          <div class="analysis-controls">
+            <select
+              class="analysis-select"
+              [value]="selectedAnalysisId()"
+              (change)="selectedAnalysisId.set($any($event.target).value)"
+            >
+              @for (q of ANALYSIS_QUERIES; track q.id) {
+                <option [value]="q.id">{{ q.label }}</option>
+              }
+            </select>
+            <button type="button" class="btn-sql" (click)="openSqlDialog()" title="Zeigt den SQL-Code, der diese Analyse in der Datenbank ausführen würde">
+              SQL anzeigen
+            </button>
+          </div>
+
+          <p class="analysis-desc muted">{{ selectedQuery().description }}</p>
+
+          <!-- Interpretation -->
+          @if (analysisRows().length > 0) {
+            <div class="analysis-insight" [class.insight-pos]="analysisInterpretation().color === 'pos'" [class.insight-neg]="analysisInterpretation().color === 'neg'" [class.insight-neutral]="analysisInterpretation().color === 'neutral'">
+              <span class="insight-icon">
+                @if (analysisInterpretation().color === 'pos') { ✅ }
+                @else if (analysisInterpretation().color === 'neg') { ⚠️ }
+                @else { 💡 }
+              </span>
+              {{ analysisInterpretation().text }}
+            </div>
+          }
+
+          <!-- Results table -->
+          @if (analysisRows().length === 0) {
+            <p class="muted" style="margin-top: 1rem;">Noch keine Daten für diese Analyse.</p>
+          } @else {
+            <div class="tx-table-wrap" style="margin-top: 0.75rem;">
+              <table class="tx-table analysis-table">
+                <thead>
+                  <tr>
+                    @for (col of selectedQuery().columns; track col.key) {
+                      <th [class.num-col]="col.format !== 'text'">{{ col.label }}</th>
+                    }
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (row of analysisRows(); track $index) {
+                    <tr>
+                      @for (col of selectedQuery().columns; track col.key) {
+                        <td
+                          [class.num-col]="col.format !== 'text'"
+                          [class.pos]="col.format === 'currency_chf' && +row[col.key]! > 0"
+                          [class.neg]="col.format === 'currency_chf' && +row[col.key]! < 0"
+                        >
+                          {{ formatAnalysisCell(row[col.key], col.format) }}
+                        </td>
+                      }
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            </div>
+          }
+        </div>
+      </div>
+
+      <!-- SQL dialog -->
+      <dialog #sqlDialog class="sql-dialog">
+        <div class="sql-dialog-head">
+          <strong>SQL — {{ selectedQuery().label }}</strong>
+          <button type="button" class="sql-dialog-close" (click)="openSqlDialogClose()">✕</button>
+        </div>
+        <p class="sql-dialog-note muted">Diese Abfrage entspricht dem, was die TypeScript-Compute-Funktion im Browser berechnet. In der Supabase SQL-Konsole direkt ausführbar.</p>
+        <pre class="sql-code">{{ selectedQuery().sql }}</pre>
+      </dialog>
+
       <div [hidden]="activeTab() !== 'missed'" class="tx-wide">
         <div class="card">
           <h3>
@@ -1054,6 +1164,8 @@ interface MissedOpportunityView {
       .pos-head { display: flex; align-items: center; gap: 8px; }
       .pos-name { font-weight: 600; }
       .pos-detail { font-size: 0.75rem; color: #888; margin-top: 2px; }
+      .pos-trailing-info { margin-top: 3px; }
+      .pos-trailing-locked { font-size: 0.75rem; color: #1a8a3c; font-weight: 500; }
       .pos-summary { margin-top: 6px; font-size: 0.75rem; }
       .exit-bar-wrap { margin-top: 4px; }
       .exit-bar-bg { position: relative; background: #eee; border-radius: 4px; height: 6px; }
@@ -1305,6 +1417,56 @@ interface MissedOpportunityView {
         .tab { padding: 0.45rem 0.55rem; font-size: 0.72rem; }
       }
     `,
+    /* ── Analysis tab ───────────────────────────────────────────────────── */
+    `
+      .analysis-controls { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+      .analysis-select {
+        flex: 1; min-width: 200px; padding: 0.35rem 0.6rem;
+        border: 1px solid #d0d0d0; border-radius: 6px;
+        font-size: 0.82rem; background: #fff; cursor: pointer;
+      }
+      .btn-sql {
+        padding: 0.35rem 0.75rem; border: 1px solid #bbb; border-radius: 6px;
+        font-size: 0.78rem; background: #f5f5f5; cursor: pointer; white-space: nowrap;
+      }
+      .btn-sql:hover { background: #e8e8e8; }
+      .analysis-desc { margin: 0.5rem 0 0; font-size: 0.8rem; }
+      .analysis-insight {
+        margin-top: 0.75rem; padding: 0.65rem 0.85rem;
+        border-radius: 8px; font-size: 0.82rem; line-height: 1.5;
+        border-left: 3px solid #ccc; background: #f9f9f9;
+      }
+      .analysis-insight.insight-pos  { border-left-color: #1a8a3c; background: #f0faf4; }
+      .analysis-insight.insight-neg  { border-left-color: #c0392b; background: #fdf5f5; }
+      .analysis-insight.insight-neutral { border-left-color: #888; background: #f9f9f9; }
+      .insight-icon { margin-right: 0.4rem; }
+      .analysis-table th.num-col,
+      .analysis-table td.num-col { text-align: right; }
+
+      /* SQL dialog */
+      .sql-dialog {
+        border: 1px solid #d0d0d0; border-radius: 10px; padding: 0;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.18); max-width: 720px; width: 92vw;
+      }
+      .sql-dialog::backdrop { background: rgba(0,0,0,0.35); }
+      .sql-dialog-head {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 0.75rem 1rem; border-bottom: 1px solid #eee; font-size: 0.88rem;
+      }
+      .sql-dialog-close {
+        background: none; border: none; font-size: 1.1rem;
+        cursor: pointer; color: #888; padding: 0 0.25rem;
+      }
+      .sql-dialog-close:hover { color: #333; }
+      .sql-dialog-note { padding: 0.5rem 1rem 0; font-size: 0.75rem; margin: 0; }
+      .sql-code {
+        margin: 0; padding: 0.75rem 1rem 1rem;
+        font-size: 0.75rem; line-height: 1.55; white-space: pre-wrap;
+        overflow-x: auto; font-family: 'Menlo', 'Consolas', monospace;
+        color: #2d3748; background: #f8f8f8;
+        border-top: 1px solid #eee; border-radius: 0 0 10px 10px;
+      }
+    `,
   ],
 })
 export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestroy {
@@ -1312,7 +1474,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
 
   // Mirrors the constants in supabase/functions/market-scan/index.ts — shown
   // in the UI so it's clear at which thresholds a position would be closed.
-  protected readonly activeTab = signal<'overview' | 'transactions' | 'missed'>('overview');
+  protected readonly activeTab = signal<'overview' | 'transactions' | 'missed' | 'analysis'>('overview');
 
   // Mirrors the constants in both Edge Functions — see market-scan's
   // strategy-constants comment for the full reasoning. Short version: with
@@ -1326,9 +1488,10 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   // rate ≈ 47%, a realistic bar for a heuristic with a genuine edge.
   protected readonly takeProfit = 0.2;
   protected readonly stopLoss = -0.06;
-  protected readonly maxPositions = 5;
+  protected readonly maxPositions = 3; // kept in sync with MAX_POSITIONS in market-scan/index.ts
 
   @ViewChild('chartCanvas') private chartCanvas?: ElementRef<HTMLCanvasElement>;
+  @ViewChild('sqlDialog') private readonly sqlDialogEl?: ElementRef<HTMLDialogElement>;
   private chart: Chart | null = null;
 
   protected readonly loading = signal(false);
@@ -1598,8 +1761,9 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     return this.buyByOpeningId().get(t.opening_transaction_id) ?? null;
   }
 
-  // The scan runs 3× per trading day (Mon–Fri) at 15:00, 17:00 and 19:00 UTC
-  // — all within NYSE/NASDAQ regular hours (09:30–16:00 ET). Outside those
+  // The scan runs 4× per trading day (Mon–Fri) at 14:30, 15:00, 17:00 and 19:00 UTC
+  // — all within NYSE/NASDAQ regular hours (09:30–16:00 ET). The 14:30 UTC run
+  // fires at market open (EDT: 10:30 ET; EST: 09:30 ET exactly). Outside those
   // windows (evenings, nights, weekends) it is intentionally idle: `isUsMarketOpen`
   // in the Edge Function refuses to buy/sell outside the session anyway, so
   // scanning then would just produce noise-only logs. That means a "stale"
@@ -1715,12 +1879,23 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     changePct: number | null;
     unrealized: number | null;
     value: number;
+    highSinceEntry: number;
+    trailingStopPrice: number;
+    /** How far the trailing stop sits from the entry price as a fraction — if
+     *  positive, the stop has risen above entry and ANY exit now protects some gain. */
+    trailingStopPctFromEntry: number;
+    /** Distance from current price to trailing stop (positive = above stop, safe). */
+    distanceToStop: number | null;
   } {
     const current = this.currentPrice(p.ticker);
     const changePct = current !== null ? (current - p.entry_price) / p.entry_price : null;
     const unrealized = current !== null ? (current - p.entry_price) * p.shares : null;
     const value = (current ?? p.entry_price) * p.shares;
-    return { current, changePct, unrealized, value };
+    const highSinceEntry = p.high_since_entry ?? p.entry_price;
+    const trailingStopPrice = highSinceEntry * (1 + this.stopLoss); // stopLoss = −0.06
+    const trailingStopPctFromEntry = (trailingStopPrice - p.entry_price) / p.entry_price;
+    const distanceToStop = current !== null ? (current - trailingStopPrice) / current : null;
+    return { current, changePct, unrealized, value, highSinceEntry, trailingStopPrice, trailingStopPctFromEntry, distanceToStop };
   }
 
   /** Sum of all open positions' mark-to-market value (using latest signal prices where available). */
@@ -2024,10 +2199,13 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
    * wider than [stopLoss, takeProfit] so the marker doesn't sit at the very
    * edge even when a position is right at its trigger.
    */
-  protected exitBarPosition(changePct: number): number {
-    const span = this.takeProfit - this.stopLoss;
+  protected exitBarPosition(changePct: number, trailingStopPctFromEntry: number = this.stopLoss): number {
+    // The bar always spans from the current trailing stop level (left edge) to
+    // take-profit (right edge). As the trailing stop rises, the left boundary
+    // shifts right — giving a visual sense of how the "safe zone" has shrunk.
+    const span = this.takeProfit - trailingStopPctFromEntry;
     const padded = span * 1.25;
-    const center = (this.takeProfit + this.stopLoss) / 2;
+    const center = (this.takeProfit + trailingStopPctFromEntry) / 2;
     const min = center - padded / 2;
     const ratio = (changePct - min) / padded;
     return Math.max(2, Math.min(98, ratio * 100));
@@ -2434,6 +2612,528 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       },
     });
   }
+
+  // ── SQL-Analyse-Tab ──────────────────────────────────────────────────────
+  // All queries are computed from the already-loaded `transactions()` signal —
+  // no extra DB round-trip needed. The `sql` string is display-only (shown in
+  // the "SQL anzeigen" dialog) so the user can understand what the TypeScript
+  // computation is doing behind the scenes.
+
+  protected readonly selectedAnalysisId = signal<string>('verdict');
+
+  // ── Query definitions ────────────────────────────────────────────────────
+
+  private static buildSellPairs(txs: TransactionRow[]): {
+    sell: TransactionRow;
+    buy: TransactionRow;
+    holdHours: number | null;
+  }[] {
+    const buyById = new Map(txs.filter((t) => t.action === 'buy').map((t) => [t.id, t]));
+    return txs
+      .filter((t) => t.action === 'sell' && t.opening_transaction_id != null)
+      .map((sell) => {
+        const buy = buyById.get(sell.opening_transaction_id!);
+        if (!buy) return null;
+        const holdHours =
+          sell.created_at && buy.created_at
+            ? (new Date(sell.created_at).getTime() - new Date(buy.created_at).getTime()) / 3_600_000
+            : null;
+        return { sell, buy, holdHours };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+  }
+
+  private static avg(nums: number[]): number | null {
+    return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
+  }
+  private static round2(n: number | null): number | null {
+    return n === null ? null : Math.round(n * 100) / 100;
+  }
+  private static winRate(wins: number, total: number): number | null {
+    return total ? Math.round((1000 * wins) / total) / 10 : null;
+  }
+
+  protected readonly ANALYSIS_QUERIES = [
+    {
+      id: 'verdict',
+      label: 'Trefferquote nach Strategie-Verdict',
+      description: 'Wie gut performen Trades, die als "organic" klassifiziert wurden? Vergleicht Gewinnrate, Ø PnL und Haltedauer je Verdict-Typ.',
+      sql: `-- Trefferquote nach Verdict
+SELECT
+  coalesce(buy.signal_snapshot->>'verdict', 'unbekannt') AS verdict,
+  count(*)                       AS trades,
+  count(*) FILTER (WHERE sell.realized_pnl > 0) AS wins,
+  round(100.0 * count(*) FILTER (WHERE sell.realized_pnl > 0)
+        / nullif(count(*),0), 1) AS win_rate_pct,
+  round(avg(sell.realized_pnl), 2) AS avg_pnl_chf,
+  round(sum(sell.realized_pnl), 2) AS total_pnl_chf,
+  round(avg(extract(epoch from
+    (sell.created_at - buy.created_at))/3600.0), 1) AS avg_hold_h
+FROM transactions sell
+JOIN transactions buy ON sell.opening_transaction_id = buy.id
+WHERE sell.action = 'sell'
+GROUP BY 1 ORDER BY total_pnl_chf DESC;`,
+      columns: [
+        { key: 'verdict',       label: 'Verdict',        format: 'text'         },
+        { key: 'trades',        label: 'Trades',         format: 'integer'      },
+        { key: 'wins',          label: 'Gewinner',       format: 'integer'      },
+        { key: 'win_rate_pct',  label: 'Trefferquote',   format: 'percent'      },
+        { key: 'avg_pnl_chf',   label: 'Ø PnL',          format: 'currency_chf' },
+        { key: 'total_pnl_chf', label: 'Gesamt-PnL',     format: 'currency_chf' },
+        { key: 'avg_hold_h',    label: 'Ø Haltedauer',   format: 'hours'        },
+      ],
+      compute: (txs: TransactionRow[]) => {
+        const pairs = TradingDashboardComponent.buildSellPairs(txs);
+        const groups = new Map<string, { wins: number; total: number; pnl: number[]; hours: number[] }>();
+        for (const { sell, buy, holdHours } of pairs) {
+          const v = buy.signal_snapshot?.verdict ?? 'unbekannt';
+          if (!groups.has(v)) groups.set(v, { wins: 0, total: 0, pnl: [], hours: [] });
+          const g = groups.get(v)!;
+          g.total++;
+          if ((sell.realized_pnl ?? 0) > 0) g.wins++;
+          if (sell.realized_pnl != null) g.pnl.push(sell.realized_pnl);
+          if (holdHours != null) g.hours.push(holdHours);
+        }
+        return Array.from(groups.entries())
+          .map(([verdict, g]) => ({
+            verdict,
+            trades: g.total,
+            wins: g.wins,
+            win_rate_pct: TradingDashboardComponent.winRate(g.wins, g.total),
+            avg_pnl_chf: TradingDashboardComponent.round2(TradingDashboardComponent.avg(g.pnl)),
+            total_pnl_chf: TradingDashboardComponent.round2(g.pnl.reduce((a, b) => a + b, 0)),
+            avg_hold_h: TradingDashboardComponent.round2(TradingDashboardComponent.avg(g.hours)),
+          }))
+          .sort((a, b) => (b.total_pnl_chf ?? 0) - (a.total_pnl_chf ?? 0));
+      },
+      interpret: (rows: Record<string, unknown>[]) => {
+        const total = rows.reduce((s, r) => s + (r['trades'] as number), 0);
+        if (total === 0) return { text: 'Noch keine abgeschlossenen Trades — Analyse verfügbar sobald die erste Position verkauft wurde.', color: 'neutral' as const };
+        const wins = rows.reduce((s, r) => s + (r['wins'] as number), 0);
+        const totalPnl = rows.reduce((s, r) => s + (r['total_pnl_chf'] as number ?? 0), 0);
+        const wr = Math.round((1000 * wins) / total) / 10;
+        const prefix = total < 10 ? `Frühe Daten (nur ${total} Trades — Zahlen noch wenig belastbar): ` : '';
+        const wrText = wr >= 60 ? `Trefferquote ${wr}% ist solide` : wr >= 50 ? `Trefferquote ${wr}% ist knapp über 50%` : `Trefferquote ${wr}% liegt unter 50%`;
+        const pnlText = totalPnl > 0 ? `Gesamtbilanz positiv (+${totalPnl.toFixed(2)} CHF).` : `Gesamtbilanz negativ (${totalPnl.toFixed(2)} CHF).`;
+        const hint = total < 10 ? ' Mindestens 15–20 abgeschlossene Trades für belastbare Aussagen.' : '';
+        const color = (wr >= 55 && totalPnl > 0) ? 'pos' as const : (wr < 45 || totalPnl < 0) ? 'neg' as const : 'neutral' as const;
+        return { text: `${prefix}${wrText}. ${pnlText}${hint}`, color };
+      },
+    },
+    {
+      id: 'exits',
+      label: 'Exit-Arten: Trailing Stop vs. Take-Profit',
+      description: 'Wie oft löste welcher Exit-Mechanismus aus — und was hat er durchschnittlich eingebracht? Vergleich Trailing Stop (v14+) mit fixem Stop-Loss (legacy) und Take-Profit.',
+      sql: `-- Exit-Arten Analyse
+SELECT
+  CASE
+    WHEN exit_reason IN ('take-profit','interim-take-profit')   THEN 'Take-Profit'
+    WHEN exit_reason IN ('trailing-stop','interim-trailing-stop') THEN 'Trailing Stop (v14+)'
+    WHEN exit_reason IN ('stop-loss','interim-stop-loss')        THEN 'Stop-Loss (fix, pre-v14)'
+    ELSE 'Sonstige'
+  END AS exit_art,
+  count(*)                         AS exits,
+  round(avg(realized_pnl), 2)      AS avg_pnl_chf,
+  round(sum(realized_pnl), 2)      AS total_pnl_chf,
+  round(avg(
+    CASE WHEN exit_reason IN ('trailing-stop','interim-trailing-stop')
+         THEN (high_since_entry - price) / nullif(price,0) * 100
+    END
+  ), 2)                            AS avg_drop_from_high_pct
+FROM transactions
+WHERE action = 'sell'
+GROUP BY 1 ORDER BY exits DESC;`,
+      columns: [
+        { key: 'exit_art',              label: 'Exit-Art',            format: 'text'         },
+        { key: 'exits',                 label: 'Anzahl',              format: 'integer'      },
+        { key: 'avg_pnl_chf',           label: 'Ø PnL',              format: 'currency_chf' },
+        { key: 'total_pnl_chf',         label: 'Gesamt-PnL',         format: 'currency_chf' },
+        { key: 'avg_drop_from_high_pct',label: 'Ø Abfall vom Hoch',  format: 'percent'      },
+      ],
+      compute: (txs: TransactionRow[]) => {
+        const sells = txs.filter((t) => t.action === 'sell');
+        const groups = new Map<string, { pnl: number[]; dropsFromHigh: number[] }>();
+        const label = (r: string | null): string => {
+          if (!r) return 'Sonstige';
+          if (r.includes('take-profit')) return 'Take-Profit';
+          if (r.includes('trailing-stop')) return 'Trailing Stop (v14+)';
+          if (r.includes('stop-loss')) return 'Stop-Loss (fix, pre-v14)';
+          return 'Sonstige';
+        };
+        for (const s of sells) {
+          const k = label(s.exit_reason);
+          if (!groups.has(k)) groups.set(k, { pnl: [], dropsFromHigh: [] });
+          const g = groups.get(k)!;
+          if (s.realized_pnl != null) g.pnl.push(s.realized_pnl);
+          if (s.exit_reason?.includes('trailing-stop') && s.high_since_entry != null && s.price != null) {
+            g.dropsFromHigh.push(((s.high_since_entry - s.price) / s.high_since_entry) * 100);
+          }
+        }
+        return ['Take-Profit', 'Trailing Stop (v14+)', 'Stop-Loss (fix, pre-v14)', 'Sonstige']
+          .map((k) => {
+            const g = groups.get(k);
+            if (!g) return null;
+            return {
+              exit_art: k,
+              exits: g.pnl.length,
+              avg_pnl_chf: TradingDashboardComponent.round2(TradingDashboardComponent.avg(g.pnl)),
+              total_pnl_chf: TradingDashboardComponent.round2(g.pnl.reduce((a, b) => a + b, 0)),
+              avg_drop_from_high_pct: TradingDashboardComponent.round2(TradingDashboardComponent.avg(g.dropsFromHigh)),
+            };
+          })
+          .filter((r): r is NonNullable<typeof r> => r !== null && r.exits > 0);
+      },
+      interpret: (rows: Record<string, unknown>[]) => {
+        const tsRow = rows.find((r) => (r['exit_art'] as string).includes('Trailing'));
+        const fixedRow = rows.find((r) => (r['exit_art'] as string).includes('fix'));
+        const tpRow = rows.find((r) => (r['exit_art'] as string).includes('Take-Profit'));
+        if (!tsRow && !tpRow) return { text: 'Noch keine abgeschlossenen Trades.', color: 'neutral' as const };
+        if (!tsRow) {
+          return { text: 'Noch kein Trailing-Stop ausgelöst — der Mechanismus ist aktiv, hatte aber noch keinen Auslöser. Das ist kein Problem: er greift nur wenn der Kurs nach einem Hoch wieder fällt.', color: 'neutral' as const };
+        }
+        const tsAvg = tsRow['avg_pnl_chf'] as number ?? 0;
+        const fixAvg = fixedRow ? (fixedRow['avg_pnl_chf'] as number ?? 0) : null;
+        const tsCnt = tsRow['exits'] as number;
+        const dropPct = tsRow['avg_drop_from_high_pct'] as number | null;
+        let text = `Trailing Stop hat ${tsCnt}× ausgelöst, Ø ${tsAvg >= 0 ? '+' : ''}${tsAvg.toFixed(2)} CHF PnL.`;
+        if (dropPct != null) text += ` Im Schnitt fiel der Kurs ${dropPct.toFixed(1)}% unter das Hoch, bevor der Stop auslöste.`;
+        if (fixAvg !== null) {
+          const diff = tsAvg - fixAvg;
+          text += diff > 0
+            ? ` Gegenüber dem alten Fix-Stop (Ø ${fixAvg.toFixed(2)} CHF) ist das eine Verbesserung von +${diff.toFixed(2)} CHF pro Trade.`
+            : ` Vergleich zum alten Fix-Stop (Ø ${fixAvg.toFixed(2)} CHF): minimal schlechter, aber Stop war seltener zu früh aktiv.`;
+        }
+        const color = tsAvg > 0 ? 'pos' as const : tsAvg > -5 ? 'neutral' as const : 'neg' as const;
+        return { text, color };
+      },
+    },
+    {
+      id: 'tickers',
+      label: 'Ticker-Leaderboard: Bestes & schlechtestes Papier',
+      description: 'Welche Aktien haben am meisten zum Gesamtergebnis beigetragen — und welche haben am meisten gekostet?',
+      sql: `-- Ticker Leaderboard
+SELECT
+  sell.ticker,
+  count(*)                          AS trades,
+  count(*) FILTER (WHERE sell.realized_pnl > 0) AS wins,
+  round(100.0 * count(*) FILTER (WHERE sell.realized_pnl > 0)
+        / nullif(count(*),0), 1)   AS win_rate_pct,
+  round(sum(sell.realized_pnl), 2) AS total_pnl_chf,
+  round(avg(sell.realized_pnl), 2) AS avg_pnl_chf
+FROM transactions sell
+WHERE sell.action = 'sell' AND sell.opening_transaction_id IS NOT NULL
+GROUP BY sell.ticker
+ORDER BY total_pnl_chf DESC;`,
+      columns: [
+        { key: 'ticker',        label: 'Ticker',        format: 'text'         },
+        { key: 'trades',        label: 'Trades',        format: 'integer'      },
+        { key: 'wins',          label: 'Gewinner',      format: 'integer'      },
+        { key: 'win_rate_pct',  label: 'Trefferquote',  format: 'percent'      },
+        { key: 'total_pnl_chf', label: 'Gesamt-PnL',    format: 'currency_chf' },
+        { key: 'avg_pnl_chf',   label: 'Ø PnL',         format: 'currency_chf' },
+      ],
+      compute: (txs: TransactionRow[]) => {
+        const pairs = TradingDashboardComponent.buildSellPairs(txs);
+        const groups = new Map<string, { wins: number; total: number; pnl: number[] }>();
+        for (const { sell } of pairs) {
+          const k = sell.ticker;
+          if (!groups.has(k)) groups.set(k, { wins: 0, total: 0, pnl: [] });
+          const g = groups.get(k)!;
+          g.total++;
+          if ((sell.realized_pnl ?? 0) > 0) g.wins++;
+          if (sell.realized_pnl != null) g.pnl.push(sell.realized_pnl);
+        }
+        return Array.from(groups.entries())
+          .map(([ticker, g]) => ({
+            ticker,
+            trades: g.total,
+            wins: g.wins,
+            win_rate_pct: TradingDashboardComponent.winRate(g.wins, g.total),
+            total_pnl_chf: TradingDashboardComponent.round2(g.pnl.reduce((a, b) => a + b, 0)),
+            avg_pnl_chf: TradingDashboardComponent.round2(TradingDashboardComponent.avg(g.pnl)),
+          }))
+          .sort((a, b) => (b.total_pnl_chf ?? 0) - (a.total_pnl_chf ?? 0));
+      },
+      interpret: (rows: Record<string, unknown>[]) => {
+        if (rows.length === 0) return { text: 'Noch keine abgeschlossenen Trades.', color: 'neutral' as const };
+        const best = rows[0];
+        const worst = rows[rows.length - 1];
+        const totalPnl = rows.reduce((s, r) => s + (r['total_pnl_chf'] as number ?? 0), 0);
+        const bestShare = totalPnl !== 0 ? Math.abs((best['total_pnl_chf'] as number ?? 0) / totalPnl * 100) : 0;
+        let text = `Bester Titel: ${best['ticker']} (+${(best['total_pnl_chf'] as number ?? 0).toFixed(2)} CHF, ${best['trades']} Trades).`;
+        if (rows.length > 1) text += ` Schwächster: ${worst['ticker']} (${(worst['total_pnl_chf'] as number ?? 0).toFixed(2)} CHF).`;
+        if (bestShare > 70 && rows.length > 2) text += ` Achtung: ${bestShare.toFixed(0)}% des Gesamtergebnisses hängt an einem einzigen Titel — hohes Klumpenrisiko.`;
+        const color = totalPnl > 0 ? 'pos' as const : totalPnl < 0 ? 'neg' as const : 'neutral' as const;
+        return { text, color };
+      },
+    },
+    {
+      id: 'fear_greed',
+      label: 'Fear & Greed: Kaufzeitpunkt vs. Ergebnis',
+      description: 'Liefern Käufe in Angst-Phasen (Score < 40) bessere Ergebnisse als in Gier-Phasen (> 60)? Ausgewertet über den CNN Fear & Greed Score zum Kaufzeitpunkt.',
+      sql: `-- Fear & Greed Einfluss
+SELECT
+  CASE
+    WHEN (buy.signal_snapshot->>'fear_greed_score')::int <= 25 THEN '≤25 Extreme Angst'
+    WHEN (buy.signal_snapshot->>'fear_greed_score')::int <= 40 THEN '26–40 Angst'
+    WHEN (buy.signal_snapshot->>'fear_greed_score')::int <= 60 THEN '41–60 Neutral'
+    WHEN (buy.signal_snapshot->>'fear_greed_score')::int <= 75 THEN '61–75 Gier'
+    WHEN (buy.signal_snapshot->>'fear_greed_score')::int IS NOT NULL
+                                                              THEN '76–100 Extreme Gier'
+    ELSE 'Unbekannt (vor v10)'
+  END                                  AS regime,
+  count(*)                             AS trades,
+  round(100.0 * count(*) FILTER (WHERE sell.realized_pnl > 0)
+        / nullif(count(*),0), 1)       AS win_rate_pct,
+  round(avg(sell.realized_pnl), 2)     AS avg_pnl_chf,
+  round(sum(sell.realized_pnl), 2)     AS total_pnl_chf
+FROM transactions sell
+JOIN transactions buy ON sell.opening_transaction_id = buy.id
+WHERE sell.action = 'sell'
+GROUP BY 1 ORDER BY 1;`,
+      columns: [
+        { key: 'regime',        label: 'Markt-Regime',  format: 'text'         },
+        { key: 'trades',        label: 'Trades',        format: 'integer'      },
+        { key: 'win_rate_pct',  label: 'Trefferquote',  format: 'percent'      },
+        { key: 'avg_pnl_chf',   label: 'Ø PnL',         format: 'currency_chf' },
+        { key: 'total_pnl_chf', label: 'Gesamt-PnL',    format: 'currency_chf' },
+      ],
+      compute: (txs: TransactionRow[]) => {
+        const pairs = TradingDashboardComponent.buildSellPairs(txs);
+        const regimeOf = (score: number | null | undefined): string => {
+          if (score == null) return 'Unbekannt (vor v10)';
+          if (score <= 25) return '≤25 Extreme Angst';
+          if (score <= 40) return '26–40 Angst';
+          if (score <= 60) return '41–60 Neutral';
+          if (score <= 75) return '61–75 Gier';
+          return '76–100 Extreme Gier';
+        };
+        const groups = new Map<string, { wins: number; total: number; pnl: number[] }>();
+        for (const { sell, buy } of pairs) {
+          const k = regimeOf(buy.signal_snapshot?.fear_greed_score as number | null | undefined);
+          if (!groups.has(k)) groups.set(k, { wins: 0, total: 0, pnl: [] });
+          const g = groups.get(k)!;
+          g.total++;
+          if ((sell.realized_pnl ?? 0) > 0) g.wins++;
+          if (sell.realized_pnl != null) g.pnl.push(sell.realized_pnl);
+        }
+        const order = ['≤25 Extreme Angst','26–40 Angst','41–60 Neutral','61–75 Gier','76–100 Extreme Gier','Unbekannt (vor v10)'];
+        return order
+          .filter((k) => groups.has(k))
+          .map((k) => {
+            const g = groups.get(k)!;
+            return {
+              regime: k,
+              trades: g.total,
+              win_rate_pct: TradingDashboardComponent.winRate(g.wins, g.total),
+              avg_pnl_chf: TradingDashboardComponent.round2(TradingDashboardComponent.avg(g.pnl)),
+              total_pnl_chf: TradingDashboardComponent.round2(g.pnl.reduce((a, b) => a + b, 0)),
+            };
+          });
+      },
+      interpret: (rows: Record<string, unknown>[]) => {
+        const known = rows.filter((r) => !(r['regime'] as string).includes('Unbekannt'));
+        if (known.length === 0) return { text: 'Noch keine Trades mit erfasstem Fear & Greed Score (erscheint ab Trades nach Einführung von v10).', color: 'neutral' as const };
+        const fearRows = known.filter((r) => (r['regime'] as string).includes('Angst'));
+        const greedRows = known.filter((r) => (r['regime'] as string).includes('Gier'));
+        const avgPnlFor = (rs: typeof known) => {
+          const pnls = rs.map((r) => r['avg_pnl_chf'] as number ?? 0).filter((v) => v != null);
+          return pnls.length ? pnls.reduce((a, b) => a + b) / pnls.length : null;
+        };
+        const fearAvg = avgPnlFor(fearRows);
+        const greedAvg = avgPnlFor(greedRows);
+        if (fearAvg === null && greedAvg === null) return { text: 'Noch zu wenig Daten für einen Regime-Vergleich.', color: 'neutral' as const };
+        let text = '';
+        if (fearAvg !== null && greedAvg !== null) {
+          text = fearAvg > greedAvg
+            ? `Kontrarisches Muster: Käufe in Angst-Phasen (Ø ${fearAvg.toFixed(2)} CHF) liefen besser als in Gier-Phasen (Ø ${greedAvg.toFixed(2)} CHF) — der Fear & Greed Gate unter 40 blockiert nur Extremfälle, nicht alle Angst-Phasen.`
+            : `Momentum-Muster: Käufe in Gier-Phasen (Ø ${greedAvg.toFixed(2)} CHF) liefen besser als in Angst-Phasen (Ø ${fearAvg.toFixed(2)} CHF).`;
+        } else if (fearAvg !== null) {
+          text = `Bisher nur Käufe in Angst-Phasen abgeschlossen: Ø ${fearAvg.toFixed(2)} CHF.`;
+        } else {
+          text = `Bisher nur Käufe in Gier-Phasen abgeschlossen: Ø ${greedAvg!.toFixed(2)} CHF.`;
+        }
+        const totalTrades = known.reduce((s, r) => s + (r['trades'] as number), 0);
+        if (totalTrades < 8) text += ' (Datenbasis noch klein — Muster kann sich ändern.)';
+        const totalPnl = known.reduce((s, r) => s + (r['total_pnl_chf'] as number ?? 0), 0);
+        return { text, color: totalPnl > 0 ? 'pos' as const : totalPnl < 0 ? 'neg' as const : 'neutral' as const };
+      },
+    },
+    {
+      id: 'hold',
+      label: 'Haltedauer: Gewinner vs. Verlierer',
+      description: 'Werden Gewinner-Trades länger gehalten als Verlierer? Ein klarer Unterschied weist auf konsequentes "Gewinne laufen lassen, Verluste schnell schneiden" hin.',
+      sql: `-- Haltedauer Gewinner vs. Verlierer
+SELECT
+  CASE WHEN sell.realized_pnl > 0 THEN 'Gewinner' ELSE 'Verlierer' END AS outcome,
+  count(*)                                                   AS trades,
+  round(avg(extract(epoch from
+    (sell.created_at - buy.created_at))/3600.0), 1)          AS avg_hold_h,
+  round(min(extract(epoch from
+    (sell.created_at - buy.created_at))/3600.0), 1)          AS min_hold_h,
+  round(max(extract(epoch from
+    (sell.created_at - buy.created_at))/3600.0), 1)          AS max_hold_h,
+  round(avg(sell.realized_pnl), 2)                           AS avg_pnl_chf,
+  round(avg((sell.price - buy.price)/nullif(buy.price,0)*100),2) AS avg_price_chg_pct
+FROM transactions sell
+JOIN transactions buy ON sell.opening_transaction_id = buy.id
+WHERE sell.action = 'sell'
+GROUP BY 1 ORDER BY 1;`,
+      columns: [
+        { key: 'outcome',          label: 'Ergebnis',       format: 'text'         },
+        { key: 'trades',           label: 'Trades',         format: 'integer'      },
+        { key: 'avg_hold_h',       label: 'Ø Stunden',      format: 'hours'        },
+        { key: 'min_hold_h',       label: 'Min. Stunden',   format: 'hours'        },
+        { key: 'max_hold_h',       label: 'Max. Stunden',   format: 'hours'        },
+        { key: 'avg_pnl_chf',      label: 'Ø PnL',          format: 'currency_chf' },
+        { key: 'avg_price_chg_pct',label: 'Ø Kursänderung', format: 'percent'      },
+      ],
+      compute: (txs: TransactionRow[]) => {
+        const pairs = TradingDashboardComponent.buildSellPairs(txs);
+        const groups: Record<string, { pnl: number[]; hours: number[]; priceChg: number[] }> = {
+          Gewinner: { pnl: [], hours: [], priceChg: [] },
+          Verlierer: { pnl: [], hours: [], priceChg: [] },
+        };
+        for (const { sell, buy, holdHours } of pairs) {
+          const k = (sell.realized_pnl ?? 0) > 0 ? 'Gewinner' : 'Verlierer';
+          if (sell.realized_pnl != null) groups[k].pnl.push(sell.realized_pnl);
+          if (holdHours != null) groups[k].hours.push(holdHours);
+          if (buy.price && sell.price) groups[k].priceChg.push(((sell.price - buy.price) / buy.price) * 100);
+        }
+        return Object.entries(groups)
+          .filter(([, g]) => g.pnl.length > 0)
+          .map(([outcome, g]) => ({
+            outcome,
+            trades: g.pnl.length,
+            avg_hold_h: TradingDashboardComponent.round2(TradingDashboardComponent.avg(g.hours)),
+            min_hold_h: g.hours.length ? TradingDashboardComponent.round2(Math.min(...g.hours)) : null,
+            max_hold_h: g.hours.length ? TradingDashboardComponent.round2(Math.max(...g.hours)) : null,
+            avg_pnl_chf: TradingDashboardComponent.round2(TradingDashboardComponent.avg(g.pnl)),
+            avg_price_chg_pct: TradingDashboardComponent.round2(TradingDashboardComponent.avg(g.priceChg)),
+          }));
+      },
+      interpret: (rows: Record<string, unknown>[]) => {
+        if (rows.length === 0) return { text: 'Noch keine abgeschlossenen Trades.', color: 'neutral' as const };
+        const wRow = rows.find((r) => r['outcome'] === 'Gewinner');
+        const lRow = rows.find((r) => r['outcome'] === 'Verlierer');
+        if (!wRow && !lRow) return { text: 'Noch keine Trades.', color: 'neutral' as const };
+        if (!wRow) return { text: `Bisher nur Verlierer-Trades (${lRow!['trades']} Stück). Ø ${(lRow!['avg_hold_h'] as number ?? 0).toFixed(1)} Stunden Haltedauer.`, color: 'neg' as const };
+        if (!lRow) return { text: `Bisher nur Gewinner-Trades (${wRow!['trades']} Stück). Ø ${(wRow!['avg_hold_h'] as number ?? 0).toFixed(1)} Stunden Haltedauer.`, color: 'pos' as const };
+        const wH = wRow['avg_hold_h'] as number ?? 0;
+        const lH = lRow['avg_hold_h'] as number ?? 0;
+        const diff = wH - lH;
+        let text = '';
+        if (diff > 5) {
+          text = `Positives Muster: Gewinner werden im Schnitt ${diff.toFixed(1)} Stunden länger gehalten als Verlierer (${wH.toFixed(1)}h vs. ${lH.toFixed(1)}h) — "Gewinne laufen lassen" funktioniert hier.`;
+        } else if (diff < -5) {
+          text = `Warnsignal: Verlierer werden im Schnitt ${Math.abs(diff).toFixed(1)} Stunden länger gehalten als Gewinner (${lH.toFixed(1)}h vs. ${wH.toFixed(1)}h). Möglicherweise zu langes Festhalten an Verlust-Positionen.`;
+        } else {
+          text = `Kein klarer Unterschied in der Haltedauer: Gewinner (${wH.toFixed(1)}h) und Verlierer (${lH.toFixed(1)}h) liegen nah beieinander.`;
+        }
+        return { text, color: diff > 5 ? 'pos' as const : diff < -5 ? 'neg' as const : 'neutral' as const };
+      },
+    },
+    {
+      id: 'monthly',
+      label: 'Monatliche Performance',
+      description: 'Wie entwickelt sich das Ergebnis Monat für Monat? Zeigt Trend, bestes und schlechtestes Monat.',
+      sql: `-- Monatliche Performance
+SELECT
+  to_char(sell.created_at, 'YYYY-MM')   AS month,
+  count(*)                               AS trades,
+  count(*) FILTER (WHERE realized_pnl > 0) AS wins,
+  round(sum(realized_pnl), 2)            AS total_pnl_chf,
+  round(avg(realized_pnl), 2)            AS avg_pnl_chf,
+  round(sum(fee + fx_fee), 2)            AS total_fees_chf
+FROM transactions sell
+WHERE action = 'sell' AND opening_transaction_id IS NOT NULL
+GROUP BY 1 ORDER BY 1 DESC;`,
+      columns: [
+        { key: 'month',          label: 'Monat',        format: 'text'         },
+        { key: 'trades',         label: 'Trades',       format: 'integer'      },
+        { key: 'wins',           label: 'Gewinner',     format: 'integer'      },
+        { key: 'total_pnl_chf',  label: 'Gesamt-PnL',   format: 'currency_chf' },
+        { key: 'avg_pnl_chf',    label: 'Ø PnL',        format: 'currency_chf' },
+        { key: 'total_fees_chf', label: 'Gebühren',     format: 'currency_chf' },
+      ],
+      compute: (txs: TransactionRow[]) => {
+        const sells = txs.filter((t) => t.action === 'sell' && t.opening_transaction_id != null);
+        const groups = new Map<string, { wins: number; total: number; pnl: number[]; fees: number[] }>();
+        for (const s of sells) {
+          const k = s.created_at ? s.created_at.slice(0, 7) : 'Unbekannt';
+          if (!groups.has(k)) groups.set(k, { wins: 0, total: 0, pnl: [], fees: [] });
+          const g = groups.get(k)!;
+          g.total++;
+          if ((s.realized_pnl ?? 0) > 0) g.wins++;
+          if (s.realized_pnl != null) g.pnl.push(s.realized_pnl);
+          g.fees.push(s.fee + s.fx_fee);
+        }
+        return Array.from(groups.entries())
+          .sort(([a], [b]) => b.localeCompare(a))
+          .map(([month, g]) => ({
+            month,
+            trades: g.total,
+            wins: g.wins,
+            total_pnl_chf: TradingDashboardComponent.round2(g.pnl.reduce((a, b) => a + b, 0)),
+            avg_pnl_chf: TradingDashboardComponent.round2(TradingDashboardComponent.avg(g.pnl)),
+            total_fees_chf: TradingDashboardComponent.round2(g.fees.reduce((a, b) => a + b, 0)),
+          }));
+      },
+      interpret: (rows: Record<string, unknown>[]) => {
+        if (rows.length === 0) return { text: 'Noch keine abgeschlossenen Trades.', color: 'neutral' as const };
+        const best = [...rows].sort((a, b) => (b['total_pnl_chf'] as number ?? 0) - (a['total_pnl_chf'] as number ?? 0))[0];
+        const worst = [...rows].sort((a, b) => (a['total_pnl_chf'] as number ?? 0) - (b['total_pnl_chf'] as number ?? 0))[0];
+        const totalPnl = rows.reduce((s, r) => s + (r['total_pnl_chf'] as number ?? 0), 0);
+        let text = rows.length === 1
+          ? `Erst ein Monat mit Daten. PnL: ${(rows[0]['total_pnl_chf'] as number ?? 0).toFixed(2)} CHF.`
+          : `${rows.length} Monate mit Trades. Bestes Monat: ${best['month']} (+${(best['total_pnl_chf'] as number ?? 0).toFixed(2)} CHF). Schlechtestes: ${worst['month']} (${(worst['total_pnl_chf'] as number ?? 0).toFixed(2)} CHF).`;
+        if (rows.length >= 3) {
+          const recent2 = rows.slice(0, 2).reduce((s, r) => s + (r['total_pnl_chf'] as number ?? 0), 0);
+          const older = rows.slice(2).reduce((s, r) => s + (r['total_pnl_chf'] as number ?? 0), 0) / Math.max(1, rows.length - 2);
+          const recent2Avg = recent2 / 2;
+          if (recent2Avg > older * 1.2) text += ' Positive Tendenz: die letzten 2 Monate liegen über dem Schnitt.';
+          else if (recent2Avg < older * 0.8) text += ' Negative Tendenz: die letzten 2 Monate liegen unter dem Schnitt.';
+        }
+        return { text, color: totalPnl > 0 ? 'pos' as const : totalPnl < 0 ? 'neg' as const : 'neutral' as const };
+      },
+    },
+  ] as const;
+
+  protected readonly selectedQuery = computed(() =>
+    this.ANALYSIS_QUERIES.find((q) => q.id === this.selectedAnalysisId()) ?? this.ANALYSIS_QUERIES[0],
+  );
+
+  protected readonly analysisRows = computed((): Record<string, unknown>[] => {
+    const query = this.selectedQuery();
+    return query ? query.compute(this.transactions() as TransactionRow[]) : [];
+  });
+
+  protected readonly analysisInterpretation = computed(() => {
+    const query = this.selectedQuery();
+    return query ? query.interpret(this.analysisRows()) : { text: '', color: 'neutral' as const };
+  });
+
+  protected openSqlDialog(): void {
+    this.sqlDialogEl?.nativeElement.showModal();
+  }
+
+  protected openSqlDialogClose(): void {
+    this.sqlDialogEl?.nativeElement.close();
+  }
+
+  protected formatAnalysisCell(value: unknown, format: string): string {
+    if (value === null || value === undefined) return '—';
+    const n = Number(value);
+    switch (format) {
+      case 'percent':    return isNaN(n) ? String(value) : `${n.toFixed(1)}%`;
+      case 'currency_chf': return isNaN(n) ? String(value) : `${n >= 0 ? '+' : ''}${n.toFixed(2)} CHF`;
+      case 'hours':      return isNaN(n) ? String(value) : n >= 24 ? `${(n / 24).toFixed(1)} Tage` : `${n.toFixed(1)}h`;
+      case 'integer':    return isNaN(n) ? String(value) : String(Math.round(n));
+      default:           return String(value);
+    }
+  }
+
+  // ── End SQL-Analyse-Tab ───────────────────────────────────────────────────
 
   private toMessage(e: unknown): string {
     if (e instanceof Error) {

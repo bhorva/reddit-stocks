@@ -230,6 +230,9 @@ export interface PositionRow {
   entry_price: number;
   opened_at: string;
   opening_transaction_id: number | null;
+  /** Highest price seen since open. Trailing stop fires at high_since_entry × 0.94.
+   *  null only for legacy positions opened before v14 and not yet re-priced. */
+  high_since_entry: number | null;
 }
 
 export interface SignalSnapshot {
@@ -285,7 +288,18 @@ export interface TransactionRow {
   created_at: string;
   signal_snapshot: SignalSnapshot | null;
   opening_transaction_id: number | null;
-  exit_reason: 'take-profit' | 'stop-loss' | 'interim-take-profit' | 'interim-stop-loss' | null;
+  exit_reason:
+    | 'take-profit'
+    | 'stop-loss'               // legacy: fixed stop-loss (pre-v14)
+    | 'interim-take-profit'
+    | 'interim-stop-loss'       // legacy: fixed interim stop (pre-v14)
+    | 'trailing-stop'           // v14+: trailing stop via market-scan
+    | 'interim-trailing-stop'   // v14+: trailing stop via price-refresh
+    | null;
+  /** Highest price the position reached during its hold (set on SELL rows only, v14+).
+   *  Combined with the linked BUY's price, lets you measure how much the trailing
+   *  stop protected vs. the old fixed stop. */
+  high_since_entry: number | null;
 }
 
 export interface BalanceHistoryRow {

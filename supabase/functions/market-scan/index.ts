@@ -180,7 +180,10 @@ const FALLBACK_USD_CHF_RATE = 0.80;
 // applies either way — there IS no weekend data to span anymore; every row in
 // the baseline is now a trading-day sample, which if anything makes the
 // baseline MORE representative of "normal" Reddit chatter, not less.)
-const HISTORY_LOOKBACK = 15; // how many past signal rows to use for the hype baseline
+const HISTORY_LOOKBACK = 20; // how many past signal rows to use for the hype baseline
+// 4 scans/day × 5 trading days/week = 20 rows ≈ 1 trading week of samples.
+// (Was 15 when the schedule was 3 scans/day; raised to match the new 14:30 UTC
+// market-open scan added alongside this change.)
 
 // ── Dynamic ticker discovery ─────────────────────────────────────────────
 // Both nudged up (25→32 / 10→14): the 5-lens "organic" classification
@@ -285,6 +288,10 @@ interface PositionRow {
   shares: number;
   entry_price: number;
   opening_transaction_id: number | null;
+  /** Highest price seen since this position was opened. Trailing stop fires at
+   *  high_since_entry × (1 + STOP_LOSS). Updated in-place whenever price
+   *  exceeds the stored value. Pre-v14 rows seeded at entry_price. */
+  high_since_entry: number;
 }
 
 interface PortfolioRow {
@@ -776,6 +783,43 @@ async function fetchYFTrending(): Promise<Set<string>> {
   }
 }
 
+// ── ntfy push notifications ───────────────────────────────────────────────
+// Sends a push notification via ntfy.sh (https://ntfy.sh) — a free, keyless
+// pub/sub notification service. The user subscribes to their chosen topic in
+// the ntfy mobile app; the Edge Function POSTs to that same topic URL.
+//
+// Topic stored as a Vault secret: `ntfy_topic`.
+// If the secret is absent (not yet set up), notifications are silently skipped
+// — fail-open so a missing secret never breaks a trading run.
+//
+// Priority scale:  1=min  2=low  3=default  4=high  5=urgent
+// Tags: emoji short-codes understood by the ntfy app (e.g. "green_circle").
+async function sendNtfy(
+  topic: string,
+  title: string,
+  message: string,
+  priority: 1 | 2 | 3 | 4 | 5 = 3,
+  tags: string[] = [],
+): Promise<void> {
+  try {
+    // Use header-based format with text/plain body — ntfy treats application/json
+    // bodies as file attachments rather than messages (confirmed in testing).
+    await fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain',
+        'X-Title': title,
+        'X-Priority': String(priority),
+        ...(tags.length ? { 'X-Tags': tags.join(',') } : {}),
+      },
+      body: message,
+    });
+  } catch (err) {
+    // Non-critical: a notification failure must never interrupt the trade run.
+    console.warn(`ntfy notification failed (non-critical): ${err}`);
+  }
+}
+
 // ── Hype classification ──────────────────────────────────────────────────
 // Correlates FIVE independent lenses so no single noisy source can drive a
 // trade on its own: how much MORE a ticker is being mentioned than usual
@@ -952,6 +996,10 @@ Deno.serve(async () => {
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
   const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
   const supabase = createClient(supabaseUrl, serviceRoleKey);
+
+  // ntfy topic: set once in Supabase Vault as `ntfy_topic`. If absent,
+  // all sendNtfy calls below are no-ops — trade logic is never affected.
+  const ntfyTopic = Deno.env.get('NTFY_TOPIC') ?? '';
 
   const log: string[] = [];
 
@@ -1341,12 +1389,29 @@ Deno.serve(async () => {
         continue;
       }
 
-      // ── Sell check: existing position hit take-profit or stop-loss ──
+      // ── Sell check: existing position hit take-profit or trailing stop ──
       // (`position` is now hoisted above, alongside `dropFromHigh` — see the
       // comment there for why both moved up.)
       if (position) {
-        const change = (price - position.entry_price) / position.entry_price;
-        const exitTriggered = change >= TAKE_PROFIT || change <= STOP_LOSS;
+        // ── Trailing stop: update the running high first ──────────────────
+        // The trailing stop fires at high_since_entry × (1 + STOP_LOSS),
+        // i.e. −6% from the HIGHEST price seen since entry — not from entry
+        // itself. This locks in profit as the position runs up: a position
+        // at +14% can't fall back below +8% before triggering an exit, unlike
+        // the old fixed stop which would have let it ride all the way back to
+        // −6% from entry. Take-profit is still anchored to entry_price (a
+        // fixed +20%-from-entry target makes more sense than a moving one that
+        // can never be "reached" if the stock keeps climbing).
+        const newHigh = Math.max(position.high_since_entry, price);
+        if (newHigh > position.high_since_entry) {
+          await supabase.from('positions').update({ high_since_entry: newHigh }).eq('id', position.id);
+          position.high_since_entry = newHigh;
+        }
+
+        const changePct = (price - position.entry_price) / position.entry_price;
+        const trailingStopPrice = newHigh * (1 + STOP_LOSS); // e.g. newHigh × 0.94
+        const exitTriggered = changePct >= TAKE_PROFIT || price <= trailingStopPrice;
+
         if (exitTriggered && !marketOpen) {
           // The exit condition fired, but a real account couldn't place the
           // order right now — log it so a glance at the run history explains
@@ -1354,9 +1419,11 @@ Deno.serve(async () => {
           // (which also respects market hours, see there) or the next
           // in-hours `market-scan` run will catch it the moment trading
           // resumes — same as a real standing order would.
+          const exitDesc = changePct >= TAKE_PROFIT
+            ? `Take-Profit: +${(changePct * 100).toFixed(1)}% seit Einstieg`
+            : `Trailing-Stop: ${price.toFixed(2)} USD ≤ Stopkurs ${trailingStopPrice.toFixed(2)} USD (${Math.abs(STOP_LOSS * 100)}% unter Hoch ${newHigh.toFixed(2)} USD)`;
           log.push(
-            `${ticker}: Exit-Schwelle erreicht (${(change * 100).toFixed(1)}% seit Einstieg, ` +
-              `${change >= TAKE_PROFIT ? 'Take-Profit' : 'Stop-Loss'}), aber US-Börsen sind geschlossen — ` +
+            `${ticker}: Exit-Schwelle erreicht (${exitDesc}), aber US-Börsen sind geschlossen — ` +
               `Order wird beim nächsten Lauf innerhalb der Handelszeiten ausgeführt.`,
           );
         }
@@ -1374,26 +1441,19 @@ Deno.serve(async () => {
           // `costBasis` only covers what was actually invested (shares ×
           // entry price) — the BUY's brokerage fee + FX margin were paid out
           // of `cash` separately and never show up here. Without subtracting
-          // them too, `realized_pnl` looks rosier than the trade truly was:
-          // e.g. a +4% exit nets ~+11 CHF by this measure alone, while the
-          // portfolio's cash actually moved by roughly -25 CHF once the
-          // entry costs are counted — a "win" that's a real loss. Fetching
-          // the linked opening transaction (cheap: sells are infrequent)
-          // makes this number mean what it says.
+          // them too, `realized_pnl` looks rosier than the trade truly was.
+          // Fetching the linked opening transaction (cheap: sells are
+          // infrequent) makes this number mean what it says.
           const openingCosts = await fetchOpeningCosts(supabase, position.opening_transaction_id);
           // Convert the cost basis at the rate that applied when the position
           // was OPENED, not today's — otherwise a currency move between entry
-          // and exit would silently get counted as "trading" P&L instead of
-          // FX P&L (both are real money either way, but conflating them would
-          // make the "Lern-Insights" verdict/z-score performance views draw
-          // the wrong lesson from what actually moved the outcome). Falls
-          // back to today's rate only for legacy positions opened before this
-          // column existed (no historical rate on file to use instead).
+          // and exit would silently get counted as "trading" P&L instead of FX P&L.
           const entryFxRate = openingCosts.usdChfRate ?? usdChfRate;
           const costBasisUsd = position.shares * position.entry_price;
           const costBasis = costBasisUsd * entryFxRate;
           const realizedPnl = proceeds - costBasis - openingCosts.fee - openingCosts.fxFee;
-          const exitReason: 'take-profit' | 'stop-loss' = change >= TAKE_PROFIT ? 'take-profit' : 'stop-loss';
+          const exitReason: 'take-profit' | 'trailing-stop' =
+            changePct >= TAKE_PROFIT ? 'take-profit' : 'trailing-stop';
 
           await supabase.from('transactions').insert({
             ticker,
@@ -1408,10 +1468,14 @@ Deno.serve(async () => {
             realized_pnl: realizedPnl,
             opening_transaction_id: position.opening_transaction_id,
             exit_reason: exitReason,
+            // v14: record highest price reached — lets post-hoc SQL measure
+            // how much the trailing stop improved vs. the old fixed stop.
+            high_since_entry: newHigh,
             reason:
               exitReason === 'take-profit'
-                ? `Take-Profit erreicht: +${(change * 100).toFixed(1)}% seit Einstieg.`
-                : `Stop-Loss ausgelöst: ${(change * 100).toFixed(1)}% seit Einstieg.`,
+                ? `Take-Profit erreicht: +${(changePct * 100).toFixed(1)}% seit Einstieg.`
+                : `Trailing-Stop ausgelöst: Kurs ${price.toFixed(2)} USD gefallen auf ≤ ${trailingStopPrice.toFixed(2)} USD ` +
+                  `(${Math.abs(STOP_LOSS * 100)}% unter Hoch von ${newHigh.toFixed(2)} USD; Einstieg ${position.entry_price.toFixed(2)} USD).`,
           });
           await supabase.from('positions').delete().eq('id', position.id);
           positions.splice(positions.indexOf(position), 1);
@@ -1420,7 +1484,19 @@ Deno.serve(async () => {
           portfolio.realized_pnl += realizedPnl;
           portfolio.total_fees += fee + fx;
           portfolio.trade_count += 1;
-          log.push(`${ticker}: SELL ${position.shares} @ ${price} (PnL ${realizedPnl.toFixed(2)} CHF, Gebühren ${(fee + fx).toFixed(2)} CHF inkl. FX)`);
+          log.push(`${ticker}: SELL ${position.shares} @ ${price} (PnL ${realizedPnl.toFixed(2)} CHF, Gebühren ${(fee + fx).toFixed(2)} CHF inkl. FX, Grund: ${exitReason})`);
+          if (ntfyTopic) {
+            const isTp = exitReason === 'take-profit';
+            await sendNtfy(
+              ntfyTopic,
+              isTp ? `✅ Take-Profit: ${ticker}` : `🔒 Trailing-Stop: ${ticker}`,
+              `${position.shares.toFixed(2)} Stk. @ ${price.toFixed(2)} USD\n` +
+                `PnL: ${realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(2)} CHF` +
+                (!isTp ? `\nHöchstpreis war: ${newHigh.toFixed(2)} USD` : ''),
+              isTp ? 4 : 3,
+              isTp ? ['white_check_mark', 'money_with_wings'] : ['lock', realizedPnl >= 0 ? 'white_check_mark' : 'x'],
+            );
+          }
           continue;
         }
       }
@@ -1536,7 +1612,13 @@ Deno.serve(async () => {
 
             const { data: inserted } = await supabase
               .from('positions')
-              .insert({ ticker, shares, entry_price: price, opening_transaction_id: txRow?.id ?? null })
+              .insert({
+                ticker,
+                shares,
+                entry_price: price,
+                opening_transaction_id: txRow?.id ?? null,
+                high_since_entry: price, // v14: trailing stop tracking starts at entry
+              })
               .select()
               .single();
             if (inserted) positions.push(inserted as PositionRow);
@@ -1545,6 +1627,18 @@ Deno.serve(async () => {
             portfolio.total_fees += fee + fx;
             portfolio.trade_count += 1;
             log.push(`${ticker}: BUY ${shares.toFixed(4)} @ ${price} (Gebühren ${(fee + fx).toFixed(2)} CHF inkl. FX)`);
+            if (ntfyTopic) {
+              await sendNtfy(
+                ntfyTopic,
+                `🟢 Kauf: ${ticker}`,
+                `${shares.toFixed(2)} Stk. @ ${price.toFixed(2)} USD\n` +
+                  `Investiert: ~${grossAmount.toFixed(0)} CHF (inkl. Gebühren)\n` +
+                  `Take-Profit bei: ${(price * (1 + TAKE_PROFIT)).toFixed(2)} USD (+${(TAKE_PROFIT * 100).toFixed(0)}%)\n` +
+                  `Stop bei: ${(price * (1 + STOP_LOSS)).toFixed(2)} USD (${(STOP_LOSS * 100).toFixed(0)}%)`,
+                4,
+                ['green_circle', 'chart_with_upwards_trend'],
+              );
+            }
           }
         }
       }

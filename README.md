@@ -2,237 +2,115 @@
 
 Angular SPA + Supabase (PostgreSQL), gehostet auf GitHub Pages.
 
-Die App zeigt eine Liste von Aktien-Tickern und wie oft sie erwähnt wurden, und
-erlaubt das Hinzufügen neuer Einträge über ein einfaches Formular.
+Zwei Bereiche:
+- **Ticker-Liste** — manuelle Übersicht von Aktien-Tickern mit Erwähnungszählungen
+- **Trading-Simulation** — automatisiertes Pump-&-Dip-Dashboard mit 10 000 CHF Startkapital, Swissquote-Gebühren und echten Marktdaten
 
 ## Lokale Entwicklung
 
 ```bash
 npm install
 cp public/config.example.js public/config.js
+# public/config.js mit SUPABASE_URL und SUPABASE_ANON_KEY füllen (git-ignoriert)
+npm start           # → http://localhost:4200
 ```
 
-Trage in `public/config.js` deine Supabase-Projektdaten (`SUPABASE_URL` und den
-öffentlichen `SUPABASE_ANON_KEY`) ein. Die Datei ist git-ignoriert und wird nie
-committet.
-
-```bash
-npm start
-```
-
-Die App ist dann unter `http://localhost:4200` erreichbar.
-
-## Build
+## Build & Deployment
 
 ```bash
 npm run build
 ```
 
-## Deployment
+Deployment auf GitHub Pages via GitHub Actions. Supabase-Zugangsdaten kommen aus den Repository-Secrets `SUPABASE_URL` und `SUPABASE_ANON_KEY`.
 
-Das Deployment auf GitHub Pages läuft über GitHub Actions. Die Supabase-Zugangsdaten
-werden dabei aus den Repository-Secrets `SUPABASE_URL` und `SUPABASE_ANON_KEY`
-generiert — es muss keine `config.js` im Repo liegen.
+---
 
-## Datenbank
+## Trading-Simulation — Setup
 
-Das Datenbankschema befindet sich in [`supabase/schema.sql`](supabase/schema.sql).
+### 1. Datenbank
 
-## Trading-Simulation (Pump &amp; Dip)
+```
+supabase/trading_schema.sql              ← Basis: Tabellen, RLS, Seed-Watchlist
+supabase/trading_schema_v*.sql           ← Migrationen (v2–v13), in Reihenfolge anwenden
+```
 
-Die App enthält zusätzlich ein Dashboard für eine automatisierte
-Handelssimulation: Startkapital 10 000 CHF, Swissquote-Gebühren, ein Scan
-alle 6 Stunden auf Basis echter Reddit-Erwähnungen und Kursdaten, sowie ein
-Log aller Käufe/Verkäufe und ein Chart der Portfolioentwicklung über die
-Zeit. Die Auswertung läuft serverseitig als Supabase Edge Function
-(`supabase/functions/market-scan`) und wird per `pg_cron` getriggert —
-unabhängig davon, ob die App im Browser offen ist.
+Alle Dateien im Supabase SQL-Editor ausführen. RLS erlaubt nur Lesen via `anon`-Key — geschrieben wird ausschliesslich durch die Edge Functions (Service-Role-Key, umgeht RLS).
 
-Die Watchlist ist **dynamisch**: es gibt keine feste Ticker-Liste. Jeder
-Scan ermittelt die aktuell meistdiskutierten, echten Ticker, validiert sie
-gegen echte Kursdaten und übernimmt sie in die aktive Watchlist — bisherige
-Einträge, die nicht mehr zu den Top-Trends gehören (und keine offene
-Position haben), werden wieder deaktiviert. So zeigt die App immer, was
-*gerade* relevant ist, statt eine starre Auswahl zu wiederholen.
-
-**Mehrere Quellen statt einer einzigen, fragilen** — Supabase Edge Functions
-laufen auf AWS-Infrastruktur, und Reddit blockiert (über Cloudflare) Anfragen
-aus Cloud-/Rechenzentrums-IP-Bereichen pauschal mit `403`, sowohl an die
-öffentlichen `*.json`-Endpunkte als auch an die OAuth-API — unabhängig vom
-`User-Agent`. Selbstständige OAuth-Zugangsdaten vergibt Reddit ausserdem seit
-Ende 2025 nicht mehr an neue Entwickler. Statt uns auf einen einzigen,
-blockierten Pfad zu verlassen, holt der Scan daher mehrere unabhängige,
-cloud-freundliche Quellen ein und korreliert sie:
-
-- **[ApeWisdom](https://apewisdom.io/api/)** — ein kostenloser, schlüsselloser
-  Aggregator, der die wichtigsten Aktien-Subreddits bereits selbst scannt und
-  Erwähnungs-Rankings bereitstellt. Das ist unser primäres
-  Reddit-Signal — er übernimmt das Reddit-Scraping von Infrastruktur aus,
-  die Reddit nicht blockiert.
-- **`old.reddit.com`** — ein direkter, aber bewusst nur ergänzender Versuch:
-  schlägt er fehl (vermutlich IP-Block), wird das geloggt und ignoriert; das
-  Ergebnis trägt einfach mit Gewicht 0 bei. Sollte Reddit die Sperre für
-  Cloud-IPs jemals lockern, liefert dieser Pfad ohne Codeänderung wieder Daten.
-- **[StockTwits](https://api.stocktwits.com/)** — eine kostenlose,
-  schlüssellose Stimmungsquelle (bullish/bearish-Tags der Trading-Community),
-  die als Korrelations-Check dient: bestätigt die breite Masse den Hype, oder
-  wirkt er einseitig fabriziert?
-- **[Yahoo Finance](https://query1.finance.yahoo.com/)** — echte Kurshistorie
-  über die öffentliche, schlüssellose Chart-JSON-API als fundamentale
-  „hat sich der Kurs wirklich bewegt"-Bestätigung. (Ursprünglich nutzten wir
-  Stooq, dessen CSV-Endpunkt inzwischen aber eine JS-Bot-Verifizierungsseite
-  statt Daten liefert — auch ausserhalb von Cloud-IPs.)
-
-Erst wenn Erwähnungs-Spitzen, Stimmung **und** Kursverlauf übereinstimmend
-„organisch" aussehen, gilt ein Ticker als handelbar — eine einzelne, laute
-Quelle kann die Simulation nicht in einen Trade treiben.
-
-**Portfolio-Wert bleibt aktuell**: Eine zweite, bewusst sehr schlanke Function
-(`supabase/functions/price-refresh`) läuft per eigenem `pg_cron`-Job alle 30
-Minuten, bepreist offene Positionen neu, löst Take-Profit/Stop-Loss-Exits ggf.
-schon zwischen den vollen 6h-Scans aus und schreibt einen frischen
-`balance_history`-Snapshot. So zeigt das Dashboard durchgehend den aktuellen
-Wert, ohne dass dafür der teure Discovery-Scan (mehrere externe APIs,
-Klassifikation, ggf. neue Käufe) öfter laufen müsste.
-
-Einmaliges Setup:
-
-1. **Tabellen anlegen**: [`supabase/trading_schema.sql`](supabase/trading_schema.sql)
-   im Supabase SQL-Editor ausführen (legt Tabellen, Policies und eine
-   Beispiel-Watchlist an).
-2. **Functions deployen**:
-   ```bash
-   supabase functions deploy market-scan
-   supabase functions deploy price-refresh
-   ```
-   Eine Reddit-App-Registrierung ist **nicht nötig**: Reddit hat die
-   selbstständige Erstellung von OAuth-Zugangsdaten Ende 2025 eingestellt
-   (manuelle Prüfung, mehrwöchige Wartezeit, persönliche Projekte werden
-   kaum bewilligt — Stichwort „Responsible Builder Policy“). Die Function
-   nutzt stattdessen Reddits öffentliche, unauthentifizierte JSON-Endpunkte
-   (`https://www.reddit.com/r/<sub>/hot.json`, `.../search.json`), die mit
-   einem aussagekräftigen `User-Agent`-Header frei lesbar bleiben — völlig
-   ausreichend für einen 6-stündlichen Scan dreier Subreddits.
-3. **Cron aktivieren**: die Schritte am Ende von `supabase/trading_schema.sql`
-   ausführen (Extensions `pg_cron`/`pg_net` aktivieren, Function-URLs und
-   Service-Role-Key im Vault hinterlegen, je einen Job für `market-scan`
-   [alle 6h, Discovery & Trading] und `price-refresh` [alle 30 Minuten,
-   Neubewertung offener Positionen] mit `cron.schedule(...)` anlegen).
-4. **Login einrichten** (`supabase/trading_schema_v8_auth_gate.sql`, einmalig):
-   ```bash
-   supabase functions deploy setup-auth-user
-   ```
-   dann einmal aufrufen (z. B. `curl -X POST .../functions/v1/setup-auth-user
-   -H "Authorization: Bearer <ANON_ODER_SERVICE_ROLE_KEY>"`) — legt den
-   einzigen Dashboard-Benutzer **bhorvath** mit Start-Passwort `1234` an
-   (`must_change_password = true`, erzwingt eine Passwortänderung beim ersten
-   Login). Idempotent: ein erneuter Aufruf meldet nur "existiert bereits",
-   ohne ein zwischenzeitlich geändertes Passwort zurückzusetzen. Anschliessend
-   `trading_schema_v8_auth_gate.sql` im SQL-Editor ausführen — das stellt jede
-   "public read"-Policy auf "nur mit gültiger Session lesbar" um.
-
-Das Frontend liest die Ergebnisse nur lesend (`anon`-Key, RLS erlaubt keine
-Schreibzugriffe von dort) — gehandelt wird ausschliesslich serverseitig.
-
-### Login (seit Migration v8)
-
-Das Dashboard ist seit Kurzem durch einen Login geschützt — Single-User-App
-mit genau einem Konto, **bhorvath**. Wichtig dabei: diese App ist eine reine
-Browser-SPA mit einem öffentlich ausgelieferten `anon`-Key
-(`public/config.js`); ein rein UI-seitiger Login wäre also nur ein Vorhang vor
-einer offenen Tür — jeder könnte die Daten weiterhin direkt über die REST-API
-abfragen. Der eigentliche Schutz kommt daher von Migration v8
-([`supabase/trading_schema_v8_auth_gate.sql`](supabase/trading_schema_v8_auth_gate.sql)),
-die jede Tabellen-Policy von "public read" (`using (true)`) auf "nur mit
-gültiger [Supabase-Auth](https://supabase.com/docs/guides/auth)-Session
-lesbar" (`using (auth.role() = 'authenticated')`) umstellt — der Login auf der
-Oberfläche ist also nur die sichtbare Seite eines Mechanismus, der auch
-serverseitig greift.
-
-Da Supabase Auth auf E-Mail/Telefon-Identitäten aufbaut und keinen
-"Benutzername" kennt, bildet die Login-Maske den eingegebenen Benutzernamen im
-Hintergrund auf eine feste, nicht auflösbare Synthetik-Adresse
-(`bhorvath@reddit-stocks.local`) ab — Details dazu im Header-Kommentar von
-`supabase/functions/setup-auth-user/index.ts`. Das initiale Passwort `1234`
-ist mit `user_metadata.must_change_password = true` markiert: nach dem ersten
-erfolgreichen Login zeigt die App zwingend einen "Passwort ändern"-Bildschirm
-(`change-password.component.ts`), bevor das Dashboard zugänglich wird — kein
-"später"-Link, ein bekanntes Default-Passwort, das übersprungen werden kann,
-bleibt erfahrungsgemäss für immer das tatsächlich genutzte.
-
-### Prozess-Verbesserungen v2 (FX-Kosten, Z-Score, Benchmark, Trade-Verknüpfung)
-
-Nach einer kritischen Durchsicht der Strategie wurden folgende Verbesserungen
-ergänzt (Migration: [`supabase/trading_schema_v2_migration.sql`](supabase/trading_schema_v2_migration.sql),
-rein additiv und idempotent — **einmalig im Supabase SQL-Editor ausführen**,
-nachdem `trading_schema.sql` bereits angewendet wurde):
-
-- **Realistische FX-Kosten**: Trades in US-Tickern von einem CHF-Konto aus
-  verursachen bei Swissquote zusätzlich zur Courtage eine
-  Devisen-Umtauschmarge (≈0,95&nbsp;%). Das wurde bisher ignoriert; jetzt
-  berechnet `fxFee()` in beiden Edge Functions diese Marge auf jeder
-  Transaktion und schreibt sie separat in die neuen Spalten
-  `transactions.currency` / `transactions.fx_fee` (zusätzlich zu `fee`,
-  der reinen Brokerage-Courtage). Das Dashboard summiert beide für
-  „Gesamtgebühren“ und zeigt sie in der Transaktionstabelle mit
-  „(inkl. FX)“-Hinweis kombiniert an.
-- **Z-Score statt Ad-hoc-Formel für den Hype-Score**: Die Klassifikation
-  vergleicht die aktuelle Erwähnungszahl jetzt über einen echten
-  Stichproben-Z-Score (`(x − μ) / σ` über die historischen Scans desselben
-  Tickers) mit dem Mittelwert, statt mit einer simplen Schwellen-Heuristik —
-  statistisch robuster bei unterschiedlich volatilen Tickern. Der Z-Score
-  fliesst auch in die geloggte `reason`-Begründung ein (`z=...`).
-- **Intraday-Kursdaten für Exit-Entscheidungen**: Zusätzlich zur täglichen
-  Historie holt `market-scan` jetzt 30-Minuten-Kerzen der letzten 5 Tage
-  (`fetchIntradayPrices`) und bevorzugt sie für den aktuellen Kurs und das
-  „Hoch der letzten Tage“ — Dip-/Exit-Erkennung reagiert dadurch deutlich
-  zeitnäher als auf Basis von Tagesschlusskursen, ohne dass deswegen öfter
-  der teure volle Scan laufen müsste (das übernimmt weiterhin
-  `price-refresh` alle 30 Minuten).
-- **SPY-Benchmark-Vergleich**: Jeder `balance_history`-Snapshot speichert
-  jetzt zusätzlich den aktuellen SPY-Kurs (`spy_price`). Das Dashboard
-  normiert ihn auf das Startkapital und zeichnet ihn als gestrichelte
-  Vergleichslinie neben der Portfoliokurve — die einzige Möglichkeit,
-  ehrlich zu beurteilen, ob die Strategie überhaupt einen Mehrwert
-  gegenüber „Geld einfach in einen Indexfonds stecken“ bietet.
-- **Strukturierte Trade-Verknüpfung & Snapshots fürs Lernen**: Jede
-  Kauf-Transaktion speichert jetzt einen JSON-„Signal-Snapshot“
-  (`signal_snapshot`: Hype-Score, Z-Score, Erwähnungen, Sentiment-Verhältnis,
-  Kurstrend, Abstand vom Hoch, Verdict, Anzahl Intraday-Datenpunkte) — der
-  komplette Merkmalsvektor zum Entscheidungszeitpunkt. Verkäufe verweisen
-  per `opening_transaction_id` zurück auf den eröffnenden Kauf und tragen
-  einen `exit_reason` (`take-profit` / `stop-loss` / `interim-take-profit` /
-  `interim-stop-loss`). Damit lassen sich künftig Fragen wie „wie performen
-  Trades mit hohem Z-Score im Schnitt?“ oder „wie lange werden Gewinner im
-  Schnitt gehalten?“ direkt per SQL beantworten, statt Freitext-Begründungen
-  manuell zu rekonstruieren.
-- **Neue Strategie-Kennzahlen im Dashboard**: Trefferquote, Ø Gewinn/Verlust,
-  maximaler Drawdown und Ø Haltedauer (aus verknüpften Buy→Sell-Paaren) — sie
-  beantworten „funktioniert die Strategie wirklich“, was die blosse
-  Gesamt-PnL-Zahl allein nicht zeigen kann (eine hohe Trefferquote mit
-  winzigen Gewinnen und seltenen riesigen Verlusten sieht in der Summe
-  identisch aus wie das Gegenteil).
-- **Scan-Frische-Anzeige**: Das Dashboard zeigt jetzt Zeitpunkt und Alter des
-  letzten `market-scan`-Laufs an und markiert ihn visuell, sobald er
-  deutlich älter als der reguläre 6-Stunden-Rhythmus ist — so fällt ein
-  lautlos hängengebliebener Cron-Job sofort auf, statt nur als unauffällig
-  flacher Chart zu erscheinen.
-- **Korrigierte Währungsbeschriftungen**: Aktienkurse, Einstiegspreise und
-  Watchlist-Preise sind tatsächlich in USD (nicht CHF, wie zuvor teils
-  beschriftet) — ein erläuternder Hinweis im Dashboard macht zudem
-  transparent, dass die Simulation 1 USD ≈ 1 CHF rechnet (kein
-  Wechselkursmodell), aber die reale FX-Marge als Gebühr abbildet.
-
-Bestehende Datensätze von vor der Migration behalten einfach ihre
-Default-/`null`-Werte (`currency='USD'`, `fx_fee=0`, `signal_snapshot=null`,
-`opening_transaction_id=null`, `exit_reason=null`, `spy_price=null`) — das
-spiegelt akkurat wider, dass diese Daten vor der ausführlicheren Protokollierung
-entstanden sind, statt Werte zu erfinden, die nie erhoben wurden.
-
-Nach der Migration müssen beide Edge Functions neu deployt werden, damit sie
-die neuen Spalten befüllen:
+### 2. Edge Functions deployen
 
 ```bash
-supabase functions deploy market-scan
-supabase functions deploy price-refresh
+supabase functions deploy market-scan    # Discovery, Klassifikation, Trades
+supabase functions deploy price-refresh  # Exit-Checks alle 30 Min. zwischen Scans
+supabase functions deploy setup-auth-user
 ```
+
+Kein Reddit-Account oder OAuth-Key nötig — Reddit blockiert Cloud-IPs pauschal, daher nutzt der Scan ausschliesslich cloud-freundliche Quellen (siehe unten).
+
+### 3. Cron-Jobs
+
+In der SQL-Konsole einmalig ausführen (Vorlage am Ende von `trading_schema.sql`):
+
+| Job | Schedule | Zweck |
+|-----|----------|-------|
+| `market-scan-at-open` | `30 14 * * 1-5` | NYSE-Eröffnung (14:30 UTC = 10:30 EDT / 09:30 EST) |
+| `market-scan-during-trading-hours` | `0 15,17,19 * * 1-5` | 3× intraday |
+| `price-refresh-every-30min` | `*/30 * * * *` | Positionen neu bepreisen |
+
+Voraussetzung: Extensions `pg_cron` und `pg_net` aktivieren, Service-Role-Key als `service_role_key` im Vault hinterlegen.
+
+### 4. Login einrichten (Migration v8)
+
+```bash
+curl -X POST .../functions/v1/setup-auth-user \
+     -H "Authorization: Bearer <ANON_ODER_SERVICE_ROLE_KEY>"
+```
+
+Legt Benutzer **bhorvath** mit Passwort `1234` an (`must_change_password = true`). Der erste Login erzwingt eine Passwortänderung. Idempotent — erneuter Aufruf überschreibt kein geändertes Passwort.
+
+Migration v8 (`trading_schema_v8_auth_gate.sql`) stellt alle RLS-Policies von "public read" auf "nur mit gültiger Auth-Session lesbar" um — der UI-Login ist also nur die sichtbare Seite; der Schutz greift auch direkt auf der API.
+
+---
+
+## Wie die Simulation funktioniert
+
+### Datenquellen (kein Reddit-OAuth nötig)
+
+Reddit blockiert Anfragen aus Cloud-IPs (AWS/Supabase) per Cloudflare-Sperre — unabhängig vom User-Agent, sowohl auf den öffentlichen `.json`-Endpunkten als auch auf der OAuth-API. Ausserdem gibt Reddit seit Ende 2025 keine neuen Entwickler-Zugangsdaten mehr heraus. Stattdessen werden mehrere unabhängige, cloud-freundliche Quellen kombiniert:
+
+- **ApeWisdom** — schlüsselloser Aggregator für Reddit-Aktiens-Subreddits (primäres Reddit-Signal)
+- **old.reddit.com** — ergänzender Direktversuch; scheitert er, wird er ignoriert (Gewicht 0)
+- **StockTwits** — bullish/bearish-Stimmung der Trading-Community als Korrelations-Check
+- **Yahoo Finance** — echte Kurshistorie (Tageskerzen + 30-Min.-Intraday) für Dip-/Exit-Erkennung
+- **CNN Fear & Greed Index** — Markt-Stimmung; Score < 40 = Kauf-Stop (bestehende Positionen unverändert)
+- **YF Trending** — ob ein Ticker aktuell auf Yahoo Finance trending ist (informativ, kein Gate)
+- **FinViz News** — ob Mainstream-Medien den Ticker bereits erwähnen (informativ; News hinkt Reddit oft 1–3 Tage nach)
+
+Ein Ticker gilt erst als handelbar, wenn Erwähnungs-Spike, Sentiment **und** Kursverlauf übereinstimmend „organisch" aussehen.
+
+### Strategie
+
+| Parameter | Wert |
+|-----------|------|
+| Startkapital | 10 000 CHF |
+| Positionsgrösse | 12 % des Portfolios |
+| Max. offene Positionen | 5 |
+| Kauf-Trigger | Kurs ≥ 2,5 % unter lokalem Hoch, Verdict = `organic` |
+| Take-Profit | +4 % |
+| Stop-Loss | −3,5 % |
+| Gebühren | Swissquote-Courtage-Staffel + FX-Marge ≈ 0,95 % |
+
+Käufe sind nur während NYSE/NASDAQ-Handelszeiten möglich (09:30–16:00 ET, Mo–Fr). Ausserhalb dieser Zeiten loggt der Scan zwar Signale, kauft aber nicht.
+
+### Watchlist
+
+Vollständig dynamisch — jeder Scan ermittelt die aktuell meistdiskutierten, validierten Ticker und aktualisiert die Watchlist. Ticker, die nicht mehr unter den Top-Trends sind und keine offene Position haben, werden deaktiviert.
+
+### price-refresh
+
+Die schlanke `price-refresh`-Function läuft alle 30 Minuten, bepreist offene Positionen neu und löst Take-Profit/Stop-Loss-Exits aus, ohne den teuren Discovery-Scan zu wiederholen. So bleibt der Dashboard-Portfoliowert durchgehend aktuell.
+
+### Was aufgezeichnet wird
+
+Jede Kauf-Transaktion speichert einen vollständigen Signal-Snapshot (Hype-Score, Z-Score, Erwähnungen, Sentiment, Kurstrend, Fear & Greed, YF Trending, FinViz News). Verkäufe verweisen per `opening_transaction_id` auf den eröffnenden Kauf und tragen einen `exit_reason` (`take-profit` / `stop-loss` / `interim-*`). Das ermöglicht spätere SQL-Analysen: Welche Signalkombinationen performen am besten? Verbessert der Fear & Greed Gate die Rendite?
+
+Das Dashboard zeigt zusätzlich Trefferquote, Ø Gewinn/Verlust, max. Drawdown, Ø Haltedauer sowie einen SPY-Benchmark-Vergleich (normiert auf das Startkapital).

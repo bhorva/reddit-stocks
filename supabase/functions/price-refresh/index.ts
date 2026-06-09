@@ -60,6 +60,8 @@ interface PositionRow {
   shares: number;
   entry_price: number;
   opening_transaction_id: number | null;
+  /** Highest price seen since open — trailing stop fires at high_since_entry × (1 + STOP_LOSS). */
+  high_since_entry: number;
 }
 
 interface PortfolioRow {
@@ -200,6 +202,31 @@ async function fetchLatestPrice(ticker: string): Promise<number | null> {
   }
 }
 
+// Mirrors the identically-named helper in `market-scan` — kept duplicated per
+// this project's "no shared module between Edge Functions" convention.
+async function sendNtfy(
+  topic: string,
+  title: string,
+  message: string,
+  priority: 1 | 2 | 3 | 4 | 5 = 3,
+  tags: string[] = [],
+): Promise<void> {
+  try {
+    await fetch(`https://ntfy.sh/${encodeURIComponent(topic)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'text/plain',
+        'X-Title': title,
+        'X-Priority': String(priority),
+        ...(tags.length ? { 'X-Tags': tags.join(',') } : {}),
+      },
+      body: message,
+    });
+  } catch (err) {
+    console.warn(`ntfy notification failed (non-critical): ${err}`);
+  }
+}
+
 Deno.serve(async () => {
   // Skip the entire run while US exchanges are closed: no exit could be
   // executed even if one triggered, prices haven't moved since the last
@@ -230,6 +257,7 @@ Deno.serve(async () => {
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
   const serviceRoleKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
   const supabase = createClient(supabaseUrl, serviceRoleKey);
+  const ntfyTopic = Deno.env.get('NTFY_TOPIC') ?? '';
 
   const log: string[] = [];
   try {
@@ -262,33 +290,33 @@ Deno.serve(async () => {
       }
       latestPrices.set(position.ticker, price);
 
-      const change = (price - position.entry_price) / position.entry_price;
-      if (change >= TAKE_PROFIT || change <= STOP_LOSS) {
+      // ── Trailing stop: update running high, then check exit ──────────────
+      const newHigh = Math.max(position.high_since_entry, price);
+      if (newHigh > position.high_since_entry) {
+        await supabase.from('positions').update({ high_since_entry: newHigh }).eq('id', position.id);
+        position.high_since_entry = newHigh;
+      }
+
+      const changePct = (price - position.entry_price) / position.entry_price;
+      const trailingStopPrice = newHigh * (1 + STOP_LOSS); // e.g. newHigh × 0.94
+      const exitTriggered = changePct >= TAKE_PROFIT || price <= trailingStopPrice;
+
+      if (exitTriggered) {
         // `grossAmount` must be the CHF-converted figure (what actually lands
         // in `cash` once Swissquote converts the USD sale proceeds) — see
-        // `market-scan`'s sell branch for the full reasoning behind the FX
-        // model.
+        // `market-scan`'s sell branch for the full reasoning behind the FX model.
         const grossAmountUsd = position.shares * price;
         const grossAmount = grossAmountUsd * usdChfRate;
         const fee = swissquoteFee(grossAmount);
         const fx = fxFee(grossAmount);
         const proceeds = grossAmount - fee - fx;
-        // See `market-scan`'s sell branch for the full explanation: costBasis
-        // alone omits the BUY's brokerage fee + FX margin (paid out of cash
-        // separately), which made `realized_pnl` look more profitable than
-        // the trade truly was. Subtracting the linked opening transaction's
-        // costs makes the number honest.
         const openingCosts = await fetchOpeningCosts(supabase, position.opening_transaction_id);
-        // Convert the cost basis at the rate that applied when the position
-        // was OPENED (not today's) — see `market-scan`'s sell branch for why
-        // mixing the two would misattribute currency moves as trading P&L.
-        // Falls back to today's rate only for legacy positions with no
-        // recorded opening rate.
         const entryFxRate = openingCosts.usdChfRate ?? usdChfRate;
         const costBasisUsd = position.shares * position.entry_price;
         const costBasis = costBasisUsd * entryFxRate;
         const realizedPnl = proceeds - costBasis - openingCosts.fee - openingCosts.fxFee;
-        const interim = change >= TAKE_PROFIT ? 'interim-take-profit' : 'interim-stop-loss';
+        const exitReason: 'interim-take-profit' | 'interim-trailing-stop' =
+          changePct >= TAKE_PROFIT ? 'interim-take-profit' : 'interim-trailing-stop';
 
         await supabase.from('transactions').insert({
           ticker: position.ticker,
@@ -302,11 +330,14 @@ Deno.serve(async () => {
           usd_chf_rate: usdChfRate,
           realized_pnl: realizedPnl,
           opening_transaction_id: position.opening_transaction_id,
-          exit_reason: interim,
+          exit_reason: exitReason,
+          // v14: record highest price reached for post-hoc trailing-stop analysis
+          high_since_entry: newHigh,
           reason:
-            change >= TAKE_PROFIT
-              ? `[Zwischen-Check] Take-Profit erreicht: +${(change * 100).toFixed(1)}% seit Einstieg.`
-              : `[Zwischen-Check] Stop-Loss ausgelöst: ${(change * 100).toFixed(1)}% seit Einstieg.`,
+            changePct >= TAKE_PROFIT
+              ? `[Zwischen-Check] Take-Profit erreicht: +${(changePct * 100).toFixed(1)}% seit Einstieg.`
+              : `[Zwischen-Check] Trailing-Stop ausgelöst: Kurs ${price.toFixed(2)} USD ≤ Stopkurs ${trailingStopPrice.toFixed(2)} USD ` +
+                `(${Math.abs(STOP_LOSS * 100)}% unter Hoch ${newHigh.toFixed(2)} USD; Einstieg ${position.entry_price.toFixed(2)} USD).`,
         });
         await supabase.from('positions').delete().eq('id', position.id);
         positions.splice(positions.indexOf(position), 1);
@@ -318,10 +349,25 @@ Deno.serve(async () => {
         portfolio.trade_count += 1;
         log.push(
           `${position.ticker}: SELL ${position.shares} @ ${price} zwischen den vollen Scans ` +
-            `(PnL ${realizedPnl.toFixed(2)} CHF, Gebühren ${(fee + fx).toFixed(2)} CHF inkl. FX, Grund: ${change >= TAKE_PROFIT ? 'Take-Profit' : 'Stop-Loss'}).`,
+            `(PnL ${realizedPnl.toFixed(2)} CHF, Gebühren ${(fee + fx).toFixed(2)} CHF inkl. FX, Grund: ${exitReason}).`,
         );
+        if (ntfyTopic) {
+          const isTp = exitReason === 'interim-take-profit';
+          await sendNtfy(
+            ntfyTopic,
+            isTp ? `✅ Take-Profit: ${position.ticker}` : `🔒 Trailing-Stop: ${position.ticker}`,
+            `${position.shares.toFixed(2)} Stk. @ ${price.toFixed(2)} USD [Zwischen-Check]\n` +
+              `PnL: ${realizedPnl >= 0 ? '+' : ''}${realizedPnl.toFixed(2)} CHF` +
+              (!isTp ? `\nHöchstpreis war: ${newHigh.toFixed(2)} USD` : ''),
+            isTp ? 4 : 3,
+            isTp ? ['white_check_mark', 'money_with_wings'] : ['lock', realizedPnl >= 0 ? 'white_check_mark' : 'x'],
+          );
+        }
       } else {
-        log.push(`${position.ticker}: ${(change * 100).toFixed(1)}% seit Einstieg, kein Exit-Trigger.`);
+        const trailingInfo = newHigh > position.entry_price
+          ? `, Trailing-Stop bei ${trailingStopPrice.toFixed(2)} USD (Hoch: ${newHigh.toFixed(2)})`
+          : '';
+        log.push(`${position.ticker}: ${(changePct * 100).toFixed(1)}% seit Einstieg${trailingInfo}, kein Exit-Trigger.`);
       }
     }
 
