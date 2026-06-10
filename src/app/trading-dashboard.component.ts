@@ -353,8 +353,106 @@ interface MissedOpportunityView {
             }
         </div>
 
+        <!-- Offene Positionen FIRST — open positions are the actionable,
+             money-at-stake view, so they outrank the (collapsible) watchlist.
+             Moved up out of .grid-bot for this reason. -->
         <div class="card">
-            <h3>Watchlist &amp; Signale</h3>
+            <h3>Offene Positionen</h3>
+            @if (positions().length === 0) {
+              <p class="muted">Keine offenen Positionen.</p>
+            } @else {
+              @for (p of positions(); track p.id) {
+                <div class="pos-row pos-row-rich">
+                  <div class="pos-head">
+                    <div class="pos-name">{{ p.ticker }}</div>
+                    @if (positionView(p).changePct !== null) {
+                      <span class="badge" [class.badge-organic]="positionView(p).changePct! >= 0" [class.badge-blocked]="positionView(p).changePct! < 0">
+                        {{ positionView(p).changePct! >= 0 ? '+' : '' }}{{ positionView(p).changePct! * 100 | number: '1.1-1' }}%
+                      </span>
+                    }
+                  </div>
+                  <div class="pos-detail">
+                    {{ p.shares | number: '1.4-4' }} Stk. &#64; Einstieg {{ p.entry_price | number: '1.2-2' }} USD
+                    @if (positionView(p).current !== null) {
+                      · aktuell {{ positionView(p).current | number: '1.2-2' }} USD
+                    } @else {
+                      · noch kein aktueller Kurs erfasst
+                    }
+                    · seit {{ p.opened_at | date: 'short' }}
+                  </div>
+                  <div class="pos-detail">
+                    Positionswert {{ positionView(p).value | number: '1.2-2' }} CHF
+                    @if (positionView(p).unrealized !== null) {
+                      · unrealisiert
+                      <span [class.pos]="positionView(p).unrealized! >= 0" [class.neg]="positionView(p).unrealized! < 0">{{ positionView(p).unrealized | number: '1.2-2' }} CHF</span>
+                    }
+                  </div>
+                  <div class="pos-detail pos-trailing-info">
+                    @if (positionView(p).trailingStopPctFromEntry > 0) {
+                      <span class="pos-trailing-locked" title="Der Trailing Stop ist hochgewandert und liegt jetzt über dem Einstiegspreis — ein Exit wäre jetzt profitabel.">
+                        🔒 Stop gesichert bei {{ positionView(p).trailingStopPrice | number: '1.2-2' }} USD
+                        (+{{ positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1' }}% über Einstieg)
+                      </span>
+                    } @else {
+                      <span class="muted">
+                        Trailing Stop bei {{ positionView(p).trailingStopPrice | number: '1.2-2' }} USD
+                        ({{ positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1' }}% ab Einstieg)
+                        @if (positionView(p).highSinceEntry > p.entry_price) {
+                          · Hoch {{ positionView(p).highSinceEntry | number: '1.2-2' }} USD
+                        }
+                      </span>
+                    }
+                    @if (positionView(p).distanceToStop !== null) {
+                      <span class="muted"> · Abstand zum Stop: {{ positionView(p).distanceToStop! * 100 | number: '1.1-1' }}%</span>
+                    }
+                  </div>
+                  @if (positionView(p).changePct !== null) {
+                    <div class="exit-bar-wrap"
+                         [title]="'Take-Profit +' + (takeProfit * 100) + '% ab Einstieg · Hard-Stop ' + (hardStop * 100) + '% ab Einstieg (unbedingter Kapitalboden). Trailing Stop bei ' + (positionView(p).trailingStopPrice | number: '1.2-2') + ' USD (' + (positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1') + '% ab Einstieg) — greift nur, wenn die Position nicht mehr kaufwürdig ist (organic + im Dip), sonst wird gehalten statt verkauft.'">
+                      <div class="exit-bar-bg">
+                        <!-- Zero line: dynamically positioned via exitBarPosition so it
+                             tracks the "break-even" point correctly as the trailing stop
+                             moves up. The hardcoded CSS fallback no longer applies. -->
+                        <div class="exit-bar-zero"
+                             [style.left.%]="exitBarPosition(0, positionView(p).trailingStopPctFromEntry)"></div>
+                        <div
+                          class="exit-bar-marker"
+                          [style.left.%]="exitBarPosition(positionView(p).changePct!, positionView(p).trailingStopPctFromEntry)"
+                          [style.background]="positionView(p).changePct! >= 0 ? '#1a8a3c' : '#c0392b'"
+                        ></div>
+                      </div>
+                      <div class="exit-bar-labels">
+                        <span [class.pos]="positionView(p).trailingStopPctFromEntry > 0">
+                          Stop {{ positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1' }}%
+                        </span>
+                        <span>Take-Profit +{{ takeProfit * 100 }}%</span>
+                      </div>
+                    </div>
+                  }
+                </div>
+              }
+              <div class="pos-summary muted">
+                Gesamtwert offener Positionen: {{ positionsValue() | number: '1.2-2' }} CHF
+                ({{ positions().length }} / {{ maxPositions }} Slots belegt)
+              </div>
+            }
+          </div>
+
+        <div class="card watchlist-card" [class.collapsed]="watchlistCollapsed()">
+            <h3
+              class="collapsible-head"
+              (click)="watchlistCollapsed.set(!watchlistCollapsed())"
+              (keydown.enter)="watchlistCollapsed.set(!watchlistCollapsed())"
+              role="button"
+              tabindex="0"
+              [attr.aria-expanded]="!watchlistCollapsed()"
+            >
+              <span class="collapse-chevron">▾</span>
+              <span>Watchlist &amp; Signale</span>
+              @if (watchlistCollapsed()) {
+                <span class="collapse-summary muted">{{ sortedSignals().length }} Ticker · tippen zum Aufklappen</span>
+              }
+            </h3>
             @if (signals().length === 0) {
               <p class="muted">Noch keine Signale erfasst.</p>
             } @else {
@@ -518,88 +616,7 @@ interface MissedOpportunityView {
           </div>
         </div>
 
-        <div class="grid-bot">
-          <div class="card">
-            <h3>Offene Positionen</h3>
-            @if (positions().length === 0) {
-              <p class="muted">Keine offenen Positionen.</p>
-            } @else {
-              @for (p of positions(); track p.id) {
-                <div class="pos-row pos-row-rich">
-                  <div class="pos-head">
-                    <div class="pos-name">{{ p.ticker }}</div>
-                    @if (positionView(p).changePct !== null) {
-                      <span class="badge" [class.badge-organic]="positionView(p).changePct! >= 0" [class.badge-blocked]="positionView(p).changePct! < 0">
-                        {{ positionView(p).changePct! >= 0 ? '+' : '' }}{{ positionView(p).changePct! * 100 | number: '1.1-1' }}%
-                      </span>
-                    }
-                  </div>
-                  <div class="pos-detail">
-                    {{ p.shares | number: '1.4-4' }} Stk. &#64; Einstieg {{ p.entry_price | number: '1.2-2' }} USD
-                    @if (positionView(p).current !== null) {
-                      · aktuell {{ positionView(p).current | number: '1.2-2' }} USD
-                    } @else {
-                      · noch kein aktueller Kurs erfasst
-                    }
-                    · seit {{ p.opened_at | date: 'short' }}
-                  </div>
-                  <div class="pos-detail">
-                    Positionswert {{ positionView(p).value | number: '1.2-2' }} CHF
-                    @if (positionView(p).unrealized !== null) {
-                      · unrealisiert
-                      <span [class.pos]="positionView(p).unrealized! >= 0" [class.neg]="positionView(p).unrealized! < 0">{{ positionView(p).unrealized | number: '1.2-2' }} CHF</span>
-                    }
-                  </div>
-                  <div class="pos-detail pos-trailing-info">
-                    @if (positionView(p).trailingStopPctFromEntry > 0) {
-                      <span class="pos-trailing-locked" title="Der Trailing Stop ist hochgewandert und liegt jetzt über dem Einstiegspreis — ein Exit wäre jetzt profitabel.">
-                        🔒 Stop gesichert bei {{ positionView(p).trailingStopPrice | number: '1.2-2' }} USD
-                        (+{{ positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1' }}% über Einstieg)
-                      </span>
-                    } @else {
-                      <span class="muted">
-                        Trailing Stop bei {{ positionView(p).trailingStopPrice | number: '1.2-2' }} USD
-                        ({{ positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1' }}% ab Einstieg)
-                        @if (positionView(p).highSinceEntry > p.entry_price) {
-                          · Hoch {{ positionView(p).highSinceEntry | number: '1.2-2' }} USD
-                        }
-                      </span>
-                    }
-                    @if (positionView(p).distanceToStop !== null) {
-                      <span class="muted"> · Abstand zum Stop: {{ positionView(p).distanceToStop! * 100 | number: '1.1-1' }}%</span>
-                    }
-                  </div>
-                  @if (positionView(p).changePct !== null) {
-                    <div class="exit-bar-wrap"
-                         [title]="'Take-Profit +' + (takeProfit * 100) + '% ab Einstieg · Hard-Stop ' + (hardStop * 100) + '% ab Einstieg (unbedingter Kapitalboden). Trailing Stop bei ' + (positionView(p).trailingStopPrice | number: '1.2-2') + ' USD (' + (positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1') + '% ab Einstieg) — greift nur, wenn die Position nicht mehr kaufwürdig ist (organic + im Dip), sonst wird gehalten statt verkauft.'">
-                      <div class="exit-bar-bg">
-                        <!-- Zero line: dynamically positioned via exitBarPosition so it
-                             tracks the "break-even" point correctly as the trailing stop
-                             moves up. The hardcoded CSS fallback no longer applies. -->
-                        <div class="exit-bar-zero"
-                             [style.left.%]="exitBarPosition(0, positionView(p).trailingStopPctFromEntry)"></div>
-                        <div
-                          class="exit-bar-marker"
-                          [style.left.%]="exitBarPosition(positionView(p).changePct!, positionView(p).trailingStopPctFromEntry)"
-                          [style.background]="positionView(p).changePct! >= 0 ? '#1a8a3c' : '#c0392b'"
-                        ></div>
-                      </div>
-                      <div class="exit-bar-labels">
-                        <span [class.pos]="positionView(p).trailingStopPctFromEntry > 0">
-                          Stop {{ positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1' }}%
-                        </span>
-                        <span>Take-Profit +{{ takeProfit * 100 }}%</span>
-                      </div>
-                    </div>
-                  }
-                </div>
-              }
-              <div class="pos-summary muted">
-                Gesamtwert offener Positionen: {{ positionsValue() | number: '1.2-2' }} CHF
-                ({{ positions().length }} / {{ maxPositions }} Slots belegt)
-              </div>
-            }
-          </div>
+        <div class="grid-bot grid-bot-single">
           <div class="card">
             <h3>
               Ticker-Leaderboard
@@ -1881,6 +1898,20 @@ interface MissedOpportunityView {
         .notif-panel { width: 100vw; }
         .scan-freshness { display: none; }
       }
+
+      /* ── Collapsible watchlist card ───────────────────────────────────── */
+      .collapsible-head {
+        cursor: pointer; user-select: none;
+        display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap;
+      }
+      .collapse-chevron {
+        display: inline-block; font-size: 0.7rem; color: #999;
+        transition: transform 0.18s ease;
+      }
+      .watchlist-card.collapsed .collapse-chevron { transform: rotate(-90deg); }
+      .collapse-summary { font-size: 0.72rem; font-weight: 400; }
+      /* When collapsed, hide everything in the card except its (clickable) header. */
+      .watchlist-card.collapsed > :not(.collapsible-head) { display: none; }
     `,
   ],
 })
@@ -1890,6 +1921,13 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   // Mirrors the constants in supabase/functions/market-scan/index.ts — shown
   // in the UI so it's clear at which thresholds a position would be closed.
   protected readonly activeTab = signal<'overview' | 'transactions' | 'missed' | 'analysis'>('overview');
+
+  // Watchlist is collapsible (the long signal tables otherwise push the more
+  // important "Offene Positionen" card far down on mobile). Default collapsed on
+  // narrow viewports, expanded on desktop; the user can toggle either way.
+  protected readonly watchlistCollapsed = signal<boolean>(
+    typeof window !== 'undefined' && window.innerWidth < 640,
+  );
 
   // ── Notification Center ──────────────────────────────────────────────────
   protected readonly pushNotifications = signal<PushNotificationRow[]>([]);
