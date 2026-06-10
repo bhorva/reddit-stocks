@@ -444,13 +444,18 @@ interface MissedOpportunityView {
                   </div>
                   @if (positionView(p).changePct !== null) {
                     <div class="exit-bar-wrap"
-                         [title]="'Take-Profit +' + (takeProfit * 100) + '% ab Einstieg · Hard-Stop ' + (hardStop * 100) + '% ab Einstieg (unbedingter Kapitalboden). Trailing Stop bei ' + (positionView(p).trailingStopPrice | number: '1.2-2') + ' USD (' + (positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1') + '% ab Einstieg) — greift nur, wenn die Position nicht mehr kaufwürdig ist (organic + im Dip), sonst wird gehalten statt verkauft.'">
+                         [title]="'Take-Profit +' + (takeProfit * 100) + '% ab Einstieg · Hard-Stop ' + (hardStop * 100) + '% ab Einstieg (unbedingter Kapitalboden). Trailing Stop bei ' + (positionView(p).trailingStopPrice | number: '1.2-2') + ' USD (' + (positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1') + '% ab Einstieg) — greift nur, wenn die Position nicht mehr kaufwürdig ist (organic + im Dip), sonst wird gehalten statt verkauft. Graue Linie = Einstieg, gestrichelte gelbe Linie = Gebühren-Break-Even (~' + (roundTripFeePct * 100 | number: '1.1-1') + '% über Einstieg).'">
                       <div class="exit-bar-bg">
                         <!-- Zero line: dynamically positioned via exitBarPosition so it
                              tracks the "break-even" point correctly as the trailing stop
                              moves up. The hardcoded CSS fallback no longer applies. -->
                         <div class="exit-bar-zero"
                              [style.left.%]="exitBarPosition(0, positionView(p).trailingStopPctFromEntry)"></div>
+                        <!-- Fee break-even line: only right of it does an exit clear the
+                             ~4.4% round-trip cost (entry-relative, so it moves with the bar). -->
+                        <div class="exit-bar-breakeven"
+                             [style.left.%]="exitBarPosition(roundTripFeePct, positionView(p).trailingStopPctFromEntry)"
+                             title="Netto-Break-Even: erst rechts dieser Linie deckt ein Exit auch die Round-Trip-Gebühr (Kauf + Verkauf, ~4.4% über Einstieg)."></div>
                         <div
                           class="exit-bar-marker"
                           [style.left.%]="exitBarPosition(positionView(p).changePct!, positionView(p).trailingStopPctFromEntry)"
@@ -1370,6 +1375,13 @@ interface MissedOpportunityView {
         position: absolute; top: -2px; bottom: -2px;
         /* left is set via [style.left.%] — dynamic per trailing-stop level */
         width: 1px; background: #bbb;
+      }
+      /* Fee break-even: dashed amber line ~+4.4% above entry — only RIGHT of it
+         does an exit clear the round-trip cost. left set via [style.left.%]. */
+      .exit-bar-breakeven {
+        position: absolute; top: -3px; bottom: -3px;
+        width: 0; border-left: 1px dashed #b8860b;
+        transform: translateX(-50%);
       }
       .exit-bar-marker {
         position: absolute; top: -3px; width: 8px; height: 12px; border-radius: 3px;
