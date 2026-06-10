@@ -12,6 +12,7 @@ import {
   signal,
 } from '@angular/core';
 import { Chart, registerables } from 'chart.js';
+import zoomPlugin from 'chartjs-plugin-zoom';
 import {
   BalanceHistoryRow,
   PortfolioRow,
@@ -26,6 +27,8 @@ import {
 } from './trading.service';
 
 Chart.register(...registerables);
+// Pan/zoom: pinch-zoom on touch (mobile), wheel/drag-zoom + pan on desktop.
+Chart.register(zoomPlugin);
 
 type SignalSortColumn = 'ticker' | 'price' | 'mention_count' | 'hype_score' | 'verdict';
 type SortDirection = 'asc' | 'desc';
@@ -334,7 +337,18 @@ interface MissedOpportunityView {
                   [title]="r.title"
                 >{{ r.label }}</button>
               }
+              @if (chartZoomed()) {
+                <button
+                  type="button"
+                  class="chart-zoom-reset"
+                  (click)="resetChartZoom()"
+                  title="Zoom/Pan zurücksetzen auf den gewählten Zeitbereich"
+                >↺ Zoom zurücksetzen</button>
+              }
             </div>
+            <p class="muted chart-zoom-hint">
+              💡 Pinch zum Zoomen (mobil) · Mausrad / Shift+Ziehen (Desktop) · Ziehen zum Verschieben
+            </p>
             <div class="chart-wrap">
               <canvas #chartCanvas></canvas>
               @if (balanceHistory().length === 0) {
@@ -1452,6 +1466,18 @@ interface MissedOpportunityView {
         color: #fff;
         border-color: #ff4500;
       }
+      .chart-zoom-reset {
+        flex: 0 0 auto;
+        padding: 5px 12px;
+        font-size: 0.72rem; font-weight: 600;
+        border: 1px solid #ff4500; border-radius: 20px;
+        background: #fff; color: #ff4500; cursor: pointer;
+        transition: background 0.12s, color 0.12s;
+      }
+      .chart-zoom-reset:hover { background: #ff4500; color: #fff; }
+      .chart-zoom-hint {
+        margin: 0 0 8px; font-size: 0.68rem; line-height: 1.4;
+      }
 
       /* ── Generic table-filter text input (watchlist + transactions) ──────── */
       .table-filter {
@@ -1527,9 +1553,12 @@ interface MissedOpportunityView {
           grid-template-columns: 1fr;
         }
 
-        /* ── Charts: shorter on small screens ── */
-        .chart-wrap { height: 200px; }
-        .chart-wrap-small { height: 160px; }
+        /* ── Charts: a bit taller on small screens so pinch-zoom + reading the
+              line are comfortable; touch-action lets vertical page scroll pass
+              through while the zoom plugin still gets horizontal pinch/pan. ── */
+        .chart-wrap { height: 260px; }
+        .chart-wrap-small { height: 170px; }
+        .chart-wrap canvas { touch-action: pan-y; }
 
         /* ── Chart mode toggle: shrink and wrap below title ── */
         .chart-mode-toggle { margin-left: 0; font-size: 0.68rem; padding: 3px 10px; }
@@ -2346,9 +2375,22 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
 
   protected readonly chartRange = signal<'2d' | '1w' | '1m' | 'all'>('2d');
 
+  /** True while the user has pinch/wheel-zoomed in — drives the reset button. */
+  protected readonly chartZoomed = signal(false);
+
   protected setChartRange(range: '2d' | '1w' | '1m' | 'all'): void {
+    // A new coarse window is a fresh view — drop any fine-grained zoom/pan so
+    // the selected range actually fills the chart instead of staying zoomed.
+    this.chart?.resetZoom();
+    this.chartZoomed.set(false);
     this.chartRange.set(range);
     this.renderChart();
+  }
+
+  /** Reset the pinch/wheel zoom back to the full selected time range. */
+  protected resetChartZoom(): void {
+    this.chart?.resetZoom();
+    this.chartZoomed.set(false);
   }
 
   /** Returns the slice of `balanceHistory` that fits the selected time window. */
@@ -3231,6 +3273,28 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
             },
           },
           tooltip: { callbacks: { label: tooltipLabel } },
+          // Dynamic zoom/pan — the big UX win on both mobile and desktop:
+          //   · Mobile: two-finger PINCH to zoom in/out on the time axis.
+          //   · Desktop: mouse WHEEL to zoom, SHIFT+DRAG for a box-zoom.
+          //   · Both: drag to PAN horizontally once zoomed in.
+          // mode 'x' keeps it a time-axis zoom (y stays comparable), and panning
+          // only does anything once zoomed, so it doesn't trap vertical page
+          // scrolling. `chartZoomed` toggles the "Zoom zurücksetzen" button.
+          zoom: {
+            pan: {
+              enabled: true,
+              mode: 'x',
+              onPanComplete: ({ chart }) => this.chartZoomed.set(chart.getZoomLevel() > 1),
+            },
+            zoom: {
+              wheel: { enabled: true },
+              pinch: { enabled: true },
+              drag: { enabled: true, modifierKey: 'shift' },
+              mode: 'x',
+              onZoomComplete: ({ chart }) => this.chartZoomed.set(chart.getZoomLevel() > 1),
+            },
+            limits: { x: { minRange: 3 } },
+          },
         },
         scales: {
           x: { ticks: { maxTicksLimit: 8 } },

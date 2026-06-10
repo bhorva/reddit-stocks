@@ -22,7 +22,8 @@
                { "glob": "**/*", "input": "public", "output": "/" }
             ],
             "styles": ["src/styles.css"],
-            "scripts": []
+            "scripts": [],
+            "allowedCommonJsDependencies": ["hammerjs"]
           },
           "configurations": {
             "production": {
