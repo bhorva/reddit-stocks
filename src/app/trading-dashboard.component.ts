@@ -1598,10 +1598,34 @@ interface MissedOpportunityView {
         /* ── Chart mode toggle: shrink and wrap below title ── */
         .chart-mode-toggle { margin-left: 0; font-size: 0.68rem; padding: 3px 10px; }
 
-        /* ── Tab bar: scrollable, don't wrap ── */
-        .tabs { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
-        .tab { flex-shrink: 0; padding: 0.5rem 0.7rem; font-size: 0.78rem; }
-        .scan-freshness { display: none; } /* too long for narrow tab bar */
+        /* ── Tab bar: 2×2 grid so all four tabs fit WITHOUT horizontal
+              scrolling (the old overflow-x:auto made them awkward to reach on
+              touch). Pill-style instead of the desktop underline. ── */
+        .tabs {
+          display: grid;
+          grid-template-columns: 1fr 1fr;
+          gap: 0.4rem;
+          border-bottom: none;
+          margin-bottom: 0.8rem;
+        }
+        .tab {
+          justify-content: center;
+          text-align: center;
+          padding: 0.6rem 0.4rem;
+          font-size: 0.78rem;
+          border: 1px solid #e2e2e2;
+          border-radius: 8px;
+          margin-bottom: 0;
+        }
+        .tab.active {
+          color: #ff4500;
+          border-color: #ff4500;
+          background: #fff5f0;
+        }
+        /* scan-freshness is the only thing in .tab-actions and is too long for a
+           narrow screen — hide the whole wrapper so the grid stays a clean 2×2. */
+        .tab-actions { display: none; }
+        .scan-freshness { display: none; }
 
         /* ── Card padding ── */
         .card { padding: 0.75rem; }
