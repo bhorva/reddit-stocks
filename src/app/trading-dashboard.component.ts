@@ -2403,9 +2403,29 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
 
   private static readonly SCAN_STALE_DURING_SESSION_MS = 3 * 60 * 60 * 1000; // 3 h
 
+  /** Background auto-refresh — see ngOnInit. */
+  private static readonly REFRESH_INTERVAL_MS = 60_000;
+  private refreshTimer: ReturnType<typeof setInterval> | null = null;
+  private onVisibility: (() => void) | null = null;
+
   ngOnInit(): void {
     if (this.trading.configured) {
       void this.load();
+
+      // Live updates: the data pipeline writes fresh balance_history/portfolio
+      // rows server-side (price-refresh every ~15-30min, market-scan every 6h),
+      // but this SPA previously only loaded ONCE on mount — so an open dashboard
+      // never reflected a new run until a manual reload. Poll quietly while the
+      // tab is visible (no spinner, keep-on-error), and refresh immediately when
+      // the user switches back to the tab.
+      this.refreshTimer = setInterval(() => {
+        if (document.visibilityState === 'visible') void this.load(true);
+      }, TradingDashboardComponent.REFRESH_INTERVAL_MS);
+
+      this.onVisibility = () => {
+        if (document.visibilityState === 'visible') void this.load(true);
+      };
+      document.addEventListener('visibilitychange', this.onVisibility);
     }
   }
 
@@ -2422,12 +2442,17 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   }
 
   ngOnDestroy(): void {
+    if (this.refreshTimer !== null) clearInterval(this.refreshTimer);
+    if (this.onVisibility) document.removeEventListener('visibilitychange', this.onVisibility);
     this.chart?.destroy();
     this.allocationChart?.destroy();
   }
 
-  private async load(): Promise<void> {
-    this.loading.set(true);
+  private async load(silent = false): Promise<void> {
+    // `silent` = background auto-refresh: don't flash the loading spinner, and
+    // on failure keep the data already on screen instead of replacing it with
+    // an error banner (a transient poll failure shouldn't wipe a working view).
+    if (!silent) this.loading.set(true);
     this.error.set(null);
     try {
       const [
@@ -2473,9 +2498,9 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       this.renderChart();
       this.renderAllocationChart();
     } catch (e) {
-      this.error.set(this.toMessage(e));
+      if (!silent) this.error.set(this.toMessage(e));
     } finally {
-      this.loading.set(false);
+      if (!silent) this.loading.set(false);
     }
   }
 
