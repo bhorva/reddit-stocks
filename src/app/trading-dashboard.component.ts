@@ -839,6 +839,59 @@ interface MissedOpportunityView {
             }
           </div>
         </div>
+
+        <!-- Signal-Edge (cross-comparison A): the linchpin test — does the
+             verdict classifier actually predict forward returns? Computed from
+             the raw signal history, independent of whether/how we traded. -->
+        <div class="grid-bot grid-bot-single">
+          <div class="card">
+            <h3>
+              Signal-Edge: Sagt das Verdict die Zukunft voraus?
+              <span class="info-icon" infoTip="Die wichtigste Frage der ganzen Strategie — UNABHÄNGIG davon, ob/wie wir gehandelt haben: Was hat der Kurs NACH einem Signal tatsächlich gemacht? Für jedes erfasste Signal wird der Forward-Return über ≈1 Tag / ≈1 Woche / ≈1 Monat gemessen (Preis desselben Tickers beim späteren Scan) und nach Verdict gruppiert. Schlägt 'Organic' das blockierte 'Pure-Hype' UND die Basislinie (alle Signale), hat der Klassifikator echten Vorhersage-Edge — die Grundvoraussetzung dafür, dass sich Optimierung an Stops/Sizing überhaupt lohnt. Ø = mittlerer Forward-Return · % pos = Anteil positiver Fälle (Trefferquote) · n = Stichprobengrösse.">ⓘ</span>
+            </h3>
+            @if (signalHistory().length === 0) {
+              <p class="muted">Noch keine Signal-Historie erfasst — diese Auswertung füllt sich mit jedem Scan.</p>
+            } @else {
+              <div class="tx-scroll-x">
+                <table class="insights-table signal-edge-table">
+                  <thead>
+                    <tr>
+                      <th>Verdict</th>
+                      @for (h of signalEdgeHorizons; track h.key) { <th>{{ h.label }}</th> }
+                    </tr>
+                  </thead>
+                  <tbody>
+                    @for (row of signalForwardReturns(); track row.verdict) {
+                      <tr [class.signal-edge-baseline]="row.verdict === '__all__'">
+                        <td>{{ row.label }}</td>
+                        @for (c of row.cells; track c.horizon) {
+                          <td>
+                            @if (c.n > 0) {
+                              <span [class.pos]="(c.mean ?? 0) > 0" [class.neg]="(c.mean ?? 0) < 0">{{ (c.mean ?? 0) >= 0 ? '+' : '' }}{{ c.mean | number: '1.1-1' }}%</span>
+                              <span class="muted signal-edge-sub"> · {{ c.hit | number: '1.0-0' }}% pos · n={{ c.n }}</span>
+                            } @else {
+                              <span class="muted">—</span>
+                            }
+                          </td>
+                        }
+                      </tr>
+                    }
+                  </tbody>
+                </table>
+              </div>
+              <p class="signal-edge-verdict"
+                 [class.pos]="signalEdgeInterpretation().color === 'pos'"
+                 [class.neg]="signalEdgeInterpretation().color === 'neg'">
+                {{ signalEdgeInterpretation().text }}
+              </p>
+              <p class="muted insights-hint">
+                Forward-Return = Kursveränderung desselben Tickers vom Signal-Zeitpunkt bis ≈1 Tag/Woche/Monat
+                später (nächster verfügbarer Scan-Preis). Misst die Vorhersagekraft des Signals selbst,
+                getrennt von Ein-/Ausstiegs-Logik und Gebühren.
+              </p>
+            }
+          </div>
+        </div>
       </div>
 
       <div [hidden]="activeTab() !== 'transactions'" class="tx-wide">
@@ -1437,6 +1490,13 @@ interface MissedOpportunityView {
       .insights-table th, .insights-table td { text-align: left; padding: 5px 8px; border-bottom: 1px solid #eee; }
       .insights-table th { color: #888; font-weight: 600; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.02em; }
       .insights-hint { margin: 0.5rem 0 0; }
+      .tx-scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      .signal-edge-table th, .signal-edge-table td { white-space: nowrap; }
+      .signal-edge-sub { font-size: 0.7rem; }
+      .signal-edge-baseline td { border-top: 2px solid #ddd; font-style: italic; }
+      .signal-edge-verdict { margin: 0.7rem 0 0; font-size: 0.82rem; font-weight: 600; line-height: 1.5; color: #555; }
+      .signal-edge-verdict.pos { color: #1a8a3c; }
+      .signal-edge-verdict.neg { color: #c0392b; }
       .tx-summary { margin-bottom: 0.75rem; }
       /* overflow-x: auto so the table scrolls horizontally instead of expanding
          the card when the viewport is narrower than the table's min-width. */
@@ -2222,6 +2282,8 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   protected readonly transactions = signal<TransactionRow[]>([]);
   protected readonly balanceHistory = signal<BalanceHistoryRow[]>([]);
   protected readonly signals = signal<SignalRow[]>([]);
+  /** Full (non-deduped) signal history — feeds the forward-return / signal-edge analysis. */
+  protected readonly signalHistory = signal<SignalRow[]>([]);
   protected readonly watchlist = signal<WatchlistRow[]>([]);
   protected readonly missedOpportunities = signal<SignalRow[]>([]);
 
@@ -2616,6 +2678,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
         verdictPerformance,
         zScorePerformance,
         pushNotifications,
+        signalHistory,
       ] = await Promise.all([
         this.trading.getPortfolio(),
         this.trading.getPositions(),
@@ -2628,6 +2691,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
         this.trading.getVerdictPerformance(),
         this.trading.getZScoreBucketPerformance(),
         this.trading.getPushNotifications(),
+        this.trading.getSignalHistory(),
       ]);
       this.portfolio.set(portfolio);
       this.positions.set(positions);
@@ -2640,6 +2704,7 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       this.verdictPerformance.set(verdictPerformance);
       this.zScorePerformance.set(zScorePerformance);
       this.pushNotifications.set(pushNotifications);
+      this.signalHistory.set(signalHistory);
 
       const latestSnapshot = balanceHistory[balanceHistory.length - 1];
       this.totalValue.set(latestSnapshot ? latestSnapshot.total_value : portfolio.cash);
@@ -2896,6 +2961,150 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     }
     return [...byTicker.values()].sort((a, b) => b.totalPnl - a.totalPnl);
   });
+
+  // ── Signal-Edge: does the verdict predict forward returns? (cross-comparison A)
+  // The linchpin question for the whole strategy: independent of how/whether we
+  // traded, what did the price ACTUALLY do after an 'organic' vs a 'pure-hype'
+  // signal? If 'organic' doesn't beat 'pure-hype' (and the all-signals
+  // baseline), the classifier has no edge and no amount of stop/sizing tuning
+  // will help. Computed purely from the signal HISTORY (price per ticker per
+  // scan) — no trades needed, so it works even with zero closed trades.
+  protected readonly signalEdgeHorizons = [
+    { key: '1d',  label: '≈1 Tag',   ms: 1 * 24 * 3600 * 1000 },
+    { key: '5d',  label: '≈1 Woche', ms: 5 * 24 * 3600 * 1000 },
+    { key: '20d', label: '≈1 Monat', ms: 20 * 24 * 3600 * 1000 },
+  ];
+  /** Below this many samples in a bucket, treat the number as noise, not signal. */
+  protected readonly minSignalEdgeSamples = 20;
+
+  protected readonly signalForwardReturns = computed(() => {
+    // Group signals by ticker, ascending in time, so we can look "forward".
+    const byTicker = new Map<string, { t: number; price: number; verdict: string }[]>();
+    for (const s of this.signalHistory()) {
+      if (!s.price || s.price <= 0) continue;
+      const arr = byTicker.get(s.ticker) ?? [];
+      arr.push({ t: new Date(s.scanned_at).getTime(), price: s.price, verdict: s.verdict });
+      byTicker.set(s.ticker, arr);
+    }
+    for (const arr of byTicker.values()) arr.sort((a, b) => a.t - b.t);
+
+    const verdicts = ['organic', 'spike', 'pure-hype', '__all__'] as const;
+    const buckets = new Map<string, Map<string, number[]>>();
+    for (const v of verdicts) {
+      const m = new Map<string, number[]>();
+      for (const h of this.signalEdgeHorizons) m.set(h.key, []);
+      buckets.set(v, m);
+    }
+
+    for (const arr of byTicker.values()) {
+      for (let i = 0; i < arr.length; i += 1) {
+        const s = arr[i];
+        for (const h of this.signalEdgeHorizons) {
+          const target = s.t + h.ms;
+          // First later point AT/AFTER the horizon, but not absurdly stale
+          // (within one extra horizon) — that's "the price ~h later".
+          let futurePrice: number | null = null;
+          for (let j = i + 1; j < arr.length; j += 1) {
+            if (arr[j].t >= target) {
+              if (arr[j].t <= target + h.ms) futurePrice = arr[j].price;
+              break;
+            }
+          }
+          if (futurePrice !== null) {
+            const ret = ((futurePrice - s.price) / s.price) * 100;
+            buckets.get(s.verdict)?.get(h.key)?.push(ret);
+            buckets.get('__all__')?.get(h.key)?.push(ret);
+          }
+        }
+      }
+    }
+
+    const agg = (vals: number[]) => {
+      if (!vals.length) return { n: 0, mean: null as number | null, hit: null as number | null };
+      const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+      const hit = (vals.filter((v) => v > 0).length / vals.length) * 100;
+      return { n: vals.length, mean, hit };
+    };
+    const labels: Record<string, string> = {
+      organic: 'Organic', spike: 'Spike', 'pure-hype': 'Pure-Hype', __all__: 'Alle (Basislinie)',
+    };
+    return verdicts.map((v) => ({
+      verdict: v,
+      label: labels[v],
+      cells: this.signalEdgeHorizons.map((h) => ({ horizon: h.key, ...agg(buckets.get(v)!.get(h.key)!) })),
+    }));
+  });
+
+  /** Largest sample count in any organic bucket — a quick "do we have enough data yet?" gauge. */
+  protected maxOrganicSamples(): number {
+    const org = this.signalForwardReturns().find((r) => r.verdict === 'organic');
+    return org ? Math.max(0, ...org.cells.map((c) => c.n)) : 0;
+  }
+
+  /** Honest verdict on whether the classifier shows a measurable edge. */
+  protected signalEdgeInterpretation(): { text: string; color: 'pos' | 'neg' | 'neutral' } {
+    const data = this.signalForwardReturns();
+    const org = data.find((r) => r.verdict === 'organic');
+    const hype = data.find((r) => r.verdict === 'pure-hype');
+    if (!org) return { text: 'Noch keine Signal-Historie erfasst.', color: 'neutral' };
+
+    // Only consider horizons where BOTH organic and pure-hype clear the noise floor.
+    let comparable = 0;
+    let organicWins = 0;
+    let organicMeanSum = 0;
+    for (const h of this.signalEdgeHorizons) {
+      const o = org.cells.find((c) => c.horizon === h.key);
+      const p = hype?.cells.find((c) => c.horizon === h.key);
+      if (o && o.n >= this.minSignalEdgeSamples && o.mean !== null) {
+        organicMeanSum += o.mean;
+        if (p && p.n >= this.minSignalEdgeSamples && p.mean !== null) {
+          comparable += 1;
+          if (o.mean > p.mean) organicWins += 1;
+        }
+      }
+    }
+    if (this.maxOrganicSamples() < this.minSignalEdgeSamples) {
+      return {
+        text: `Noch zu wenig Daten (max. ${this.maxOrganicSamples()} organische Stichproben pro Horizont, ` +
+          `Schwelle ${this.minSignalEdgeSamples}). Die Tabelle füllt sich mit jedem Scan — erst ab ausreichend ` +
+          `Stichproben ist die Aussage belastbar. Bis dahin: Zahlen mit Vorsicht lesen.`,
+        color: 'neutral',
+      };
+    }
+    if (comparable === 0) {
+      const avg = organicMeanSum / Math.max(1, this.signalEdgeHorizons.filter((h) => {
+        const o = org.cells.find((c) => c.horizon === h.key);
+        return o && o.n >= this.minSignalEdgeSamples;
+      }).length);
+      return {
+        text: `Organic-Signale liefen im Schnitt ${avg >= 0 ? '+' : ''}${avg.toFixed(1)}% nach vorne, ` +
+          `aber es gibt noch zu wenige Pure-Hype-Stichproben für einen direkten Vergleich. Sobald beide Gruppen ` +
+          `genug Daten haben, zeigt sich hier, ob der Filter wirklich diskriminiert.`,
+        color: 'neutral',
+      };
+    }
+    if (organicWins === comparable) {
+      return {
+        text: `Organic schlägt Pure-Hype über ${organicWins}/${comparable} vergleichbare Horizonte — ` +
+          `ein Hinweis auf echten Vorhersage-Edge des Klassifikators. Das ist die Grundvoraussetzung dafür, ` +
+          `dass sich Stop-/Sizing-Optimierung überhaupt lohnt.`,
+        color: 'pos',
+      };
+    }
+    if (organicWins === 0) {
+      return {
+        text: `Organic schlägt Pure-Hype in KEINEM vergleichbaren Horizont — der Verdict-Filter zeigt bislang ` +
+          `keinen messbaren Vorhersage-Edge. Bevor an Stops/Sizing gefeilt wird, sollte das Klassifikations-Konzept ` +
+          `hinterfragt werden (oder mehr Daten gesammelt, falls die Stichprobe noch klein ist).`,
+        color: 'neg',
+      };
+    }
+    return {
+      text: `Gemischtes Bild: Organic schlägt Pure-Hype in ${organicWins}/${comparable} Horizonten — ` +
+        `ein schwacher, uneinheitlicher Edge. Mehr Daten nötig, um zu entscheiden, ob er real ist.`,
+      color: 'neutral',
+    };
+  }
 
   /**
    * Each open position's mark-to-market value as a % of the total invested

@@ -113,6 +113,26 @@ export class TradingService {
     return (data ?? []) as WatchlistRow[];
   }
 
+  /**
+   * Full signal HISTORY (not deduped) for the forward-return / signal-edge
+   * analysis — every scan's price + verdict per ticker, so the dashboard can
+   * ask "what did the price actually do AFTER an 'organic' vs 'pure-hype'
+   * signal?". Capped at a generous row count (the table grows ~4 scans/day ×
+   * watchlist size, so this covers many weeks) and trimmed to just the columns
+   * the analysis needs, keeping the payload small.
+   */
+  async getSignalHistory(limit = 12000): Promise<SignalRow[]> {
+    const { data, error } = await this.getClient()
+      .from('signals')
+      .select('id, ticker, scanned_at, price, verdict, hype_score')
+      .order('scanned_at', { ascending: false })
+      .limit(limit);
+    if (error) {
+      throw error;
+    }
+    return (data ?? []) as SignalRow[];
+  }
+
   /** Latest signal per watched ticker, newest scan first per ticker. */
   async getWatchlistSignals(): Promise<SignalRow[]> {
     const { data, error } = await this.getClient()
