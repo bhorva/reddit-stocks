@@ -419,10 +419,15 @@ interface MissedOpportunityView {
                     }
                   </div>
                   <div class="pos-detail pos-trailing-info">
-                    @if (positionView(p).trailingStopPctFromEntry > 0) {
-                      <span class="pos-trailing-locked" title="Der Trailing Stop ist hochgewandert und liegt jetzt über dem Einstiegspreis — ein Exit wäre jetzt profitabel.">
-                        🔒 Stop gesichert bei {{ positionView(p).trailingStopPrice | number: '1.2-2' }} USD
-                        (+{{ positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1' }}% über Einstieg)
+                    @if (positionView(p).trailingStopPctFromEntry >= roundTripFeePct) {
+                      <span class="pos-trailing-locked" title="Der Trailing Stop liegt mehr als die Round-Trip-Gebühr (~{{ roundTripFeePct * 100 | number: '1.1-1' }}%) über dem Einstieg — ein Exit hier wäre auch NACH Kauf- und Verkaufsgebühr netto im Plus.">
+                        🔒 Gewinn gesichert: Stop bei {{ positionView(p).trailingStopPrice | number: '1.2-2' }} USD
+                        (+{{ positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1' }}% über Einstieg — nach Gebühren positiv)
+                      </span>
+                    } @else if (positionView(p).trailingStopPctFromEntry > 0) {
+                      <span class="pos-trailing-breakeven" title="Der Stop liegt zwar über dem Einstiegspreis, aber noch unter der Gebühren-Schwelle: ein Exit hier wäre nach der Round-Trip-Gebühr (~{{ roundTripFeePct * 100 | number: '1.1-1' }}%) netto noch leicht negativ. Erst ab +{{ roundTripFeePct * 100 | number: '1.1-1' }}% über Einstieg trägt sich der Trade.">
+                        ↗ Stop bei {{ positionView(p).trailingStopPrice | number: '1.2-2' }} USD
+                        (+{{ positionView(p).trailingStopPctFromEntry * 100 | number: '1.1-1' }}% über Einstieg — deckt Gebühren noch nicht)
                       </span>
                     } @else {
                       <span class="muted">
@@ -1357,6 +1362,7 @@ interface MissedOpportunityView {
       .pos-detail { font-size: 0.75rem; color: #888; margin-top: 2px; }
       .pos-trailing-info { margin-top: 3px; }
       .pos-trailing-locked { font-size: 0.75rem; color: #1a8a3c; font-weight: 500; }
+      .pos-trailing-breakeven { font-size: 0.75rem; color: #b8860b; font-weight: 500; }
       .pos-summary { margin-top: 6px; font-size: 0.75rem; }
       .exit-bar-wrap { margin-top: 4px; }
       .exit-bar-bg { position: relative; background: #eee; border-radius: 4px; height: 6px; }
@@ -2156,6 +2162,12 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   protected readonly takeProfit = 0.2;
   protected readonly stopLoss = -0.06; // trailing-stop distance below the since-entry peak (STOP_LOSS)
   protected readonly hardStop = -0.08; // unconditional capital floor, % loss from entry (HARD_STOP)
+  // Approx. Swissquote round-trip cost (brokerage + FX margin, BOTH legs) on a
+  // typical ~24%-of-portfolio position — see the fee math in market-scan. A
+  // trailing-stop exit is only a NET gain once the stop sits at least this far
+  // above entry; below it, "stop above entry" still means a small after-fee
+  // loss. Used purely to label the positions card honestly (not an exit gate).
+  protected readonly roundTripFeePct = 0.044;
   protected readonly maxPositions = 3; // kept in sync with MAX_POSITIONS in market-scan/index.ts
   // Fallback USD/CHF rate when no live rate is recorded yet — matches the
   // FALLBACK_USD_CHF_RATE constant in the Edge Functions so client-side CHF
