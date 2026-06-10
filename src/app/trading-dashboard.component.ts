@@ -446,7 +446,7 @@ interface MissedOpportunityView {
                 </div>
               }
               <div class="pos-summary muted">
-                Gesamtwert offener Positionen: {{ positionsValue() | number: '1.2-2' }} CHF
+                Gesamtwert offener Positionen: {{ openPositionsValueChf() | number: '1.2-2' }} CHF
                 ({{ positions().length }} / {{ maxPositions }} Slots belegt)
               </div>
             }
@@ -2140,6 +2140,10 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   protected readonly stopLoss = -0.06; // trailing-stop distance below the since-entry peak (STOP_LOSS)
   protected readonly hardStop = -0.08; // unconditional capital floor, % loss from entry (HARD_STOP)
   protected readonly maxPositions = 3; // kept in sync with MAX_POSITIONS in market-scan/index.ts
+  // Fallback USD/CHF rate when no live rate is recorded yet — matches the
+  // FALLBACK_USD_CHF_RATE constant in the Edge Functions so client-side CHF
+  // conversions line up with what the engine writes to balance_history.
+  private static readonly FALLBACK_USD_CHF_RATE = 0.8;
 
   @ViewChild('chartCanvas') private chartCanvas?: ElementRef<HTMLCanvasElement>;
   @ViewChild('sqlDialog') private readonly sqlDialogEl?: ElementRef<HTMLDialogElement>;
@@ -2610,8 +2614,14 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   } {
     const current = this.currentPrice(p.ticker);
     const changePct = current !== null ? (current - p.entry_price) / p.entry_price : null;
-    const unrealized = current !== null ? (current - p.entry_price) * p.shares : null;
-    const value = (current ?? p.entry_price) * p.shares;
+    // `value`/`unrealized` are displayed in CHF, but `current`/`entry_price`/
+    // `shares` are USD-denominated — convert at the latest USD/CHF rate (the
+    // same basis balance_history uses), otherwise these would be USD numbers
+    // mislabeled "CHF" and wouldn't reconcile with the portfolio total. Prices
+    // themselves stay in USD in the template (they're shown with a "USD" unit).
+    const rate = this.latestUsdChfRate() ?? TradingDashboardComponent.FALLBACK_USD_CHF_RATE;
+    const unrealized = current !== null ? (current - p.entry_price) * p.shares * rate : null;
+    const value = (current ?? p.entry_price) * p.shares * rate;
     const highSinceEntry = p.high_since_entry ?? p.entry_price;
     const trailingStopPrice = highSinceEntry * (1 + this.stopLoss); // stopLoss = −0.06
     const trailingStopPctFromEntry = (trailingStopPrice - p.entry_price) / p.entry_price;
@@ -2619,9 +2629,27 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     return { current, changePct, unrealized, value, highSinceEntry, trailingStopPrice, trailingStopPctFromEntry, distanceToStop };
   }
 
-  /** Sum of all open positions' mark-to-market value (using latest signal prices where available). */
+  /**
+   * Sum of open positions' mark-to-market value in **USD** (latest signal
+   * prices). Used only as the denominator for `positionSizeShare` — a USD/USD
+   * ratio where the currency cancels, so no FX conversion is needed here. For a
+   * CHF figure that reconciles with the portfolio total, the template uses
+   * `totalValue() − cash` instead (authoritative, from balance_history).
+   */
   protected positionsValue(): number {
     return this.positions().reduce((sum, p) => sum + (this.currentPrice(p.ticker) ?? p.entry_price) * p.shares, 0);
+  }
+
+  /**
+   * Open-positions value in CHF, derived so it ALWAYS reconciles with the
+   * headline numbers the user sees: Portfoliowert (`totalValue`) minus Cash
+   * (`portfolio.cash`) — i.e. exactly balance_history's `positions_value`, which
+   * the Edge Functions compute as shares × price × the live USD/CHF rate. This
+   * is what the "Gesamtwert offener Positionen" line shows, guaranteeing
+   * positions + cash = portfolio value by construction.
+   */
+  protected openPositionsValueChf(): number {
+    return this.totalValue() - (this.portfolio()?.cash ?? 0);
   }
 
   protected buyCount(): number {
