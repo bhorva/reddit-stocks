@@ -225,18 +225,35 @@ interface MissedOpportunityView {
             </div>
           </div>
           <div class="card">
-            <h3>Hype-Blocks <span class="info-icon" infoTip="Anzahl Aktien, bei denen die Engine einen Erwähnungs-Anstieg als reinen, unbegründeten Hype eingestuft und deshalb BEWUSST NICHT gehandelt hat ('Pure-Hype'-Verdict). Das verhinderte Kapital, das damit nicht riskiert wurde, steht darunter — eine Wette, die nicht eingegangen wurde, ist hier ein Erfolg, kein verpasster Gewinn (zumindest, wenn die Klassifikation stimmt — siehe 'Lern-Insights' weiter unten).">ⓘ</span></h3>
-            <div class="stat-value neu">{{ portfolio()?.blocked_count ?? 0 }}</div>
-            <div class="stat-sub">{{ portfolio()?.blocked_capital | number: '1.2-2' }} CHF nicht riskiert</div>
+            <h3>Gesamtrendite <span class="info-icon" infoTip="Gesamtergebnis der Strategie seit Start in Prozent — die Veränderung des Portfoliowerts (Cash + aktueller Wert offener Positionen, also INKLUSIVE noch nicht realisierter Gewinne/Verluste) gegenüber dem Startkapital. Ergänzt die absolute CHF-Zahl ('Portfoliowert') um die direkt ablesbare Frage 'bin ich insgesamt im Plus oder Minus?'. Normiert auf den ersten erfassten Snapshot.">ⓘ</span></h3>
+            @if (totalReturnPct() !== null) {
+              <div class="stat-value" [class.pos]="(totalReturnPct() ?? 0) >= 0" [class.neg]="(totalReturnPct() ?? 0) < 0">
+                {{ (totalReturnPct() ?? 0) >= 0 ? '+' : '' }}{{ totalReturnPct() | number: '1.1-1' }}%
+              </div>
+              <div class="stat-sub">seit Start · inkl. unrealisierter Gewinne</div>
+            } @else {
+              <div class="stat-value muted">—</div>
+              <div class="stat-sub">Noch keine Auswertung gelaufen.</div>
+            }
+          </div>
+          <div class="card">
+            <h3>Hype-Blocks <span class="info-icon" infoTip="Aktien, deren aktuellster Scan sie als reinen, unbegründeten Hype eingestuft hat ('Pure-Hype'-Verdict) — die Engine handelt sie BEWUSST NICHT, weil ein Erwähnungs-Anstieg ohne fundamentale Bestätigung (Kurs, Stimmung, Volumen) das typische 'Pump'-Muster ist. Die Zahl zeigt, wie viele der aktuell beobachteten Ticker gerade auf diese Weise gemieden werden — eine nicht eingegangene Wette ist hier ein Erfolg, kein verpasster Gewinn (sofern die Klassifikation stimmt, siehe 'Lern-Insights').">ⓘ</span></h3>
+            @if (signals().length > 0) {
+              <div class="stat-value neu">{{ blockedTickerCount() }}</div>
+              <div class="stat-sub">von {{ signals().length }} beobachteten Tickern aktuell als reiner Hype eingestuft</div>
+            } @else {
+              <div class="stat-value muted">—</div>
+              <div class="stat-sub">Noch keine Signale erfasst.</div>
+            }
           </div>
           <div class="card" [class.card-buy-gate]="buyGateActive()">
             <h3>
               Markt-Stimmung
               <span class="info-icon" infoTip="CNN Fear & Greed Index (0–100): misst die allgemeine Marktstimmung anhand von 7 Faktoren wie Volatilität, Momentum und Optionsvolumen. 0 = Extreme Angst, 100 = Extreme Gier. Werte unter 40 ('Angst') aktivieren automatisch einen Kauf-Stop: die Engine öffnet dann keine neuen Positionen, weil das systemische Risiko zu hoch ist. Bestehende Positionen (Stop-Loss / Take-Profit) laufen unverändert weiter. Quelle: CNN Business / production.dataviz.cnn.io — gratis, kein API-Key nötig.">ⓘ</span>
             </h3>
-            @if (latestFearGreedScore(); as score) {
-              <div class="stat-value" [class]="fearGreedClass(score)">{{ score }}</div>
-              <div class="stat-sub">{{ fearGreedLabel(score) }}</div>
+            @if (latestFearGreedScore() !== null) {
+              <div class="stat-value" [class]="fearGreedClass(latestFearGreedScore()!)">{{ latestFearGreedScore() }}</div>
+              <div class="stat-sub">{{ fearGreedLabel(latestFearGreedScore()!) }}</div>
             } @else {
               <div class="stat-value muted">—</div>
               <div class="stat-sub">Noch kein Wert erfasst (ab nächstem Scan).</div>
@@ -253,8 +270,8 @@ interface MissedOpportunityView {
         -->
           <div class="card">
             <h3>Trefferquote <span class="info-icon" infoTip="Anteil der bereits abgeschlossenen (verkauften) Trades, die mit Gewinn endeten. Sagt für sich allein noch nichts über die Höhe von Gewinnen/Verlusten aus — siehe daneben.">ⓘ</span></h3>
-            @if (winRate(); as wr) {
-              <div class="stat-value" [class.pos]="wr >= 50" [class.neg]="wr < 50">{{ wr | number: '1.0-0' }}%</div>
+            @if (closedTrades().length > 0) {
+              <div class="stat-value" [class.pos]="(winRate() ?? 0) >= 50" [class.neg]="(winRate() ?? 0) < 50">{{ winRate() | number: '1.0-0' }}%</div>
               <div class="stat-sub">{{ winCount() }} Gewinner · {{ lossCount() }} Verlierer von {{ closedTrades().length }} geschlossenen Trades</div>
             } @else {
               <div class="stat-value muted">—</div>
@@ -278,8 +295,8 @@ interface MissedOpportunityView {
           </div>
           <div class="card">
             <h3>Max. Drawdown <span class="info-icon" infoTip="Der grösste Rückgang vom bisherigen Höchststand des Portfoliowerts bis zum darauffolgenden Tiefpunkt — zeigt, wie schmerzhaft die schlimmste bisherige Durststrecke war, selbst wenn die Gesamtbilanz am Ende positiv ausfällt. Ein Standard-Risikomass aus der Finanzwelt.">ⓘ</span></h3>
-            @if (maxDrawdownPct(); as dd) {
-              <div class="stat-value neg">−{{ dd | number: '1.1-1' }}%</div>
+            @if (maxDrawdownPct() !== null) {
+              <div class="stat-value" [class.neg]="(maxDrawdownPct() ?? 0) > 0">{{ (maxDrawdownPct() ?? 0) > 0 ? '−' : '' }}{{ maxDrawdownPct() | number: '1.1-1' }}%</div>
               <div class="stat-sub">grösster Rückgang vom bisherigen Höchststand des Portfoliowerts</div>
             } @else {
               <div class="stat-value muted">—</div>
@@ -288,8 +305,8 @@ interface MissedOpportunityView {
           </div>
           <div class="card">
             <h3>Volatilität <span class="info-icon" infoTip="Standardabweichung der Schwankungen des Portfoliowerts zwischen aufeinanderfolgenden Snapshots — ein Standard-Risikomass: hohe Werte bedeuten ein 'ruppigeres' Auf und Ab auf dem Weg zum Endergebnis, niedrige Werte einen ruhigeren Verlauf. Ergänzt den Max. Drawdown (der zeigt nur den schlimmsten EINZELNEN Einbruch, nicht wie unruhig der gesamte Verlauf war).">ⓘ</span></h3>
-            @if (volatilityPct(); as vol) {
-              <div class="stat-value">±{{ vol | number: '1.1-1' }}%</div>
+            @if (volatilityPct() !== null) {
+              <div class="stat-value">±{{ volatilityPct() | number: '1.1-1' }}%</div>
               <div class="stat-sub">Standardabweichung der Wertänderungen zwischen Snapshots</div>
             } @else {
               <div class="stat-value muted">—</div>
@@ -298,8 +315,8 @@ interface MissedOpportunityView {
           </div>
           <div class="card">
             <h3>Ø Haltedauer <span class="info-icon" infoTip="Wie lange eine Position im Schnitt gehalten wird, bevor sie verkauft wird — egal ob durch Take-Profit, Stop-Loss oder einen Zwischen-Check. Kurze Haltedauern bei volatilen Aktien können auf 'Lärm' statt echte Trends hindeuten.">ⓘ</span></h3>
-            @if (avgHoldingHours(); as h) {
-              <div class="stat-value">{{ formatHoldingDuration(h) }}</div>
+            @if (avgHoldingHours() !== null) {
+              <div class="stat-value">{{ formatHoldingDuration(avgHoldingHours()!) }}</div>
               <div class="stat-sub">über alle verknüpften Buy→Sell-Paare hinweg</div>
             } @else {
               <div class="stat-value muted">—</div>
@@ -2713,6 +2730,32 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   protected winRate(): number | null {
     const closed = this.closedTrades();
     return closed.length ? (this.winCount() / closed.length) * 100 : null;
+  }
+
+  /**
+   * Tickers in the current watchlist whose latest scan flagged them as pure
+   * hype ('blocked') — a stable, live "how many hype traps are we actively
+   * avoiding right now" count. Unlike `portfolio.blocked_count` (which the
+   * engine resets to 0 at the start of EVERY scan, so it's almost always 0 or a
+   * fleeting per-run number), this is derived from the same latest-per-ticker
+   * signals shown in the watchlist, so it's always meaningful and consistent
+   * with what the user sees there.
+   */
+  protected blockedTickerCount(): number {
+    return this.signals().filter((s) => s.blocked).length;
+  }
+
+  /**
+   * Total return since inception (incl. unrealized P&L), as a % of the starting
+   * capital — the normalized companion to the absolute Portfoliowert ("am I up
+   * or down overall?"). Anchored to the FIRST recorded balance snapshot
+   * (≈10'000 CHF), matching the chart's "% seit Start" mode.
+   */
+  protected totalReturnPct(): number | null {
+    const history = this.balanceHistory();
+    const start = history.length ? history[0].total_value : null;
+    if (start === null || start === 0) return null;
+    return ((this.totalValue() - start) / start) * 100;
   }
 
   protected avgWin(): number | null {
