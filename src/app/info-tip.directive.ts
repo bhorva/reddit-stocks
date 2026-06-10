@@ -7,20 +7,18 @@ import { Directive, ElementRef, Input, OnDestroy, OnInit } from '@angular/core';
  *
  * Usage: `<span class="info-icon" infoTip="Your explanation here">ⓘ</span>`
  *
- * The directive:
- *  - Sets `title` on the host element from `infoTip` so desktop users still
- *    get the native hover tooltip without any changes to their experience.
- *  - On click/tap: measures the host's position, appends a fixed-position
- *    popover to <body> (always visible, never clipped by overflow:hidden
- *    ancestors), and closes it on outside-click or ESC.
- *  - Cleans up the popover on directive destroy (e.g. route/component removal).
- *
- * Why DOM manipulation instead of an Angular overlay service?
- * The host element lives inside deeply nested table cells and card headers
- * that may have overflow:hidden — Angular CDK's Overlay or a portal-based
- * solution would be the "proper" Angular way but adds a large dependency for
- * a purely cosmetic, read-only tooltip. A self-contained body-appended div
- * is the minimal, reliable cross-browser solution for this exact use-case.
+ * Behaviour:
+ *  - Keeps the native `title` so desktop mouse-hover still shows a tooltip.
+ *  - On click/tap it appends, to <body> (so no overflow:hidden ancestor can
+ *    clip it), a BACKDROP + the popover.
+ *      · Desktop (≥640px): the popover is anchored below/above the icon.
+ *      · Mobile (<640px): the popover is a BOTTOM SHEET pinned to the viewport
+ *        bottom, the backdrop dims the page, and background scrolling is locked.
+ *        This fixes the two mobile bugs the anchored-only version had: the
+ *        popover appearing to "scroll with the page" (it was positioned once on
+ *        open while the page kept scrolling behind it), and unreliable dismissal
+ *        on touch (the old setTimeout + document-click-once trick was flaky).
+ *  - Dismiss: tap the backdrop, tap ✕, or press ESC.
  */
 @Directive({
   selector: '[infoTip]',
@@ -38,10 +36,14 @@ export class InfoTipDirective implements OnInit, OnDestroy {
   @Input() infoTip = '';
 
   private popoverEl: HTMLElement | null = null;
-  private readonly boundOutsideClick = this.closePopover.bind(this);
+  private backdropEl: HTMLElement | null = null;
+  private prevBodyOverflow = '';
   private readonly boundKeyEsc = (e: KeyboardEvent) => {
     if (e.key === 'Escape') this.closePopover();
   };
+
+  private static readonly MOBILE_MAX = 640;
+  private static readonly SCREEN_MARGIN = 10;
 
   constructor(private readonly el: ElementRef<HTMLElement>) {}
 
@@ -56,46 +58,74 @@ export class InfoTipDirective implements OnInit, OnDestroy {
       this.closePopover();
       return;
     }
-    const host = event.currentTarget as HTMLElement;
-    const rect = host.getBoundingClientRect();
+    const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
     this.openPopover(rect);
   }
 
   private openPopover(anchorRect: DOMRect): void {
+    const isMobile = window.innerWidth < InfoTipDirective.MOBILE_MAX;
+    const M = InfoTipDirective.SCREEN_MARGIN;
+
+    // Backdrop: reliably captures the dismiss tap (replaces the old fragile
+    // setTimeout + document-click-once) and dims the page on mobile.
+    const backdrop = document.createElement('div');
+    Object.assign(backdrop.style, {
+      position: 'fixed',
+      inset: '0',
+      zIndex: '9998',
+      background: isMobile ? 'rgba(0,0,0,0.4)' : 'transparent',
+    });
+    backdrop.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.closePopover();
+    });
+
     const div = document.createElement('div');
     div.setAttribute('role', 'tooltip');
     div.setAttribute('aria-live', 'polite');
-
-    // Position: prefer below the anchor; flip above if it would overflow the bottom.
-    const POPOVER_MAX_WIDTH = 320;
-    const SCREEN_MARGIN = 10;
-    const left = Math.max(
-      SCREEN_MARGIN,
-      Math.min(anchorRect.left, window.innerWidth - POPOVER_MAX_WIDTH - SCREEN_MARGIN),
-    );
-    const spaceBelow = window.innerHeight - anchorRect.bottom - SCREEN_MARGIN;
-    const top =
-      spaceBelow >= 60
-        ? anchorRect.bottom + 8
-        : Math.max(SCREEN_MARGIN, anchorRect.top - 8); // approx above; JS will adjust after render
-
     Object.assign(div.style, {
       position: 'fixed',
       zIndex: '9999',
-      top: `${top}px`,
-      left: `${left}px`,
-      maxWidth: `min(${POPOVER_MAX_WIDTH}px, calc(100vw - ${SCREEN_MARGIN * 2}px))`,
       background: '#fff',
       border: '1px solid #ddd',
-      borderRadius: '10px',
-      boxShadow: '0 4px 24px rgba(0,0,0,0.13)',
-      padding: '0.75rem 0.9rem',
-      fontSize: '0.82rem',
+      borderRadius: '12px',
+      boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+      padding: '0.85rem 1rem',
+      fontSize: '0.85rem',
       lineHeight: '1.5',
       color: '#444',
-      // Prevents the popover from acting as a click target that would close itself
-      // via the outside-click listener (stopPropagation on the inner close btn handles it).
     });
+    // A tap inside the popover must not bubble to the backdrop and close it.
+    div.addEventListener('click', (e) => e.stopPropagation());
+
+    if (isMobile) {
+      // Bottom sheet: pinned to the viewport bottom, full width minus margins,
+      // scrollable if the text is long. Never detaches from view, never clipped.
+      Object.assign(div.style, {
+        left: `${M}px`,
+        right: `${M}px`,
+        bottom: `${M}px`,
+        maxHeight: '70vh',
+        overflowY: 'auto',
+      });
+      // Lock the page so it can't scroll behind the open sheet.
+      this.prevBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
+    } else {
+      // Desktop: anchor below the icon, flip above if it would overflow.
+      const POPOVER_MAX_WIDTH = 320;
+      const left = Math.max(
+        M,
+        Math.min(anchorRect.left, window.innerWidth - POPOVER_MAX_WIDTH - M),
+      );
+      const spaceBelow = window.innerHeight - anchorRect.bottom - M;
+      const top = spaceBelow >= 60 ? anchorRect.bottom + 8 : Math.max(M, anchorRect.top - 8);
+      Object.assign(div.style, {
+        top: `${top}px`,
+        left: `${left}px`,
+        maxWidth: `min(${POPOVER_MAX_WIDTH}px, calc(100vw - ${M * 2}px))`,
+      });
+    }
 
     const closeBtn = document.createElement('button');
     closeBtn.textContent = '✕';
@@ -106,7 +136,7 @@ export class InfoTipDirective implements OnInit, OnDestroy {
       border: 'none',
       cursor: 'pointer',
       color: '#bbb',
-      fontSize: '0.85rem',
+      fontSize: '1rem',
       marginLeft: '10px',
       padding: '0',
       lineHeight: '1',
@@ -122,31 +152,37 @@ export class InfoTipDirective implements OnInit, OnDestroy {
 
     div.appendChild(closeBtn);
     div.appendChild(text);
+    document.body.appendChild(backdrop);
     document.body.appendChild(div);
     this.popoverEl = div;
+    this.backdropEl = backdrop;
 
-    // After render, if it would clip the bottom, move it above the anchor.
-    requestAnimationFrame(() => {
-      if (!this.popoverEl) return;
-      const popRect = this.popoverEl.getBoundingClientRect();
-      if (popRect.bottom > window.innerHeight - SCREEN_MARGIN) {
-        this.popoverEl.style.top = `${Math.max(SCREEN_MARGIN, anchorRect.top - popRect.height - 8)}px`;
-      }
-    });
+    // Desktop only: if the anchored popover still clips the bottom, flip it above.
+    if (!isMobile) {
+      requestAnimationFrame(() => {
+        if (!this.popoverEl) return;
+        const popRect = this.popoverEl.getBoundingClientRect();
+        if (popRect.bottom > window.innerHeight - M) {
+          this.popoverEl.style.top = `${Math.max(M, anchorRect.top - popRect.height - 8)}px`;
+        }
+      });
+    }
 
-    // Close on any outside click (setTimeout so this tick's click doesn't trigger it immediately).
-    setTimeout(() => {
-      document.addEventListener('click', this.boundOutsideClick, { once: true });
-      document.addEventListener('keydown', this.boundKeyEsc);
-    }, 0);
+    document.addEventListener('keydown', this.boundKeyEsc);
   }
 
   closePopover(): void {
     if (this.popoverEl) {
-      document.body.removeChild(this.popoverEl);
+      this.popoverEl.remove();
       this.popoverEl = null;
     }
-    document.removeEventListener('click', this.boundOutsideClick);
+    if (this.backdropEl) {
+      this.backdropEl.remove();
+      this.backdropEl = null;
+    }
+    // Restore background scrolling (mobile sheet locked it).
+    document.body.style.overflow = this.prevBodyOverflow;
+    this.prevBodyOverflow = '';
     document.removeEventListener('keydown', this.boundKeyEsc);
   }
 
