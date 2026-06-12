@@ -52,17 +52,17 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 // trailing stop fires only when the persisted meta proves we would NOT re-buy.
 // If that meta is missing (migration pending / legacy row), the trailing stop
 // stays dormant here and falls back to market-scan's 6-hourly run.
-const TAKE_PROFIT = 0.2;
-const STOP_LOSS = -0.06; // trailing-stop distance below the since-entry peak
-const HARD_STOP = -0.08; // unconditional capital floor, % loss from entry
+let TAKE_PROFIT = 0.2;
+let STOP_LOSS = -0.06; // trailing-stop distance below the since-entry peak
+let HARD_STOP = -0.08; // unconditional capital floor, % loss from entry
 
 // Dip thresholds — kept in sync with market-scan. Used to mirror its
 // `wouldBuyNow` trailing-stop suppression: a position whose price is at least
 // (DIP_THRESH + NEAR_DIP_BUFFER) below its stored multi-week high AND still
 // classified 'organic' is one the engine would re-open, so price-refresh HOLDS
 // it instead of churning it out on a trailing stop (see the v17 logic below).
-const DIP_THRESH = -0.04;
-const NEAR_DIP_BUFFER = 0.01;
+let DIP_THRESH = -0.04;
+let NEAR_DIP_BUFFER = 0.01;
 
 // Currency-conversion spread Swissquote charges on USD-denominated trades from
 // a CHF account — kept in sync with the same constant in `market-scan`.
@@ -294,6 +294,31 @@ async function logNotification(
   }
 }
 
+/**
+ * v18: load the strategy knobs this function uses from the singleton
+ * `strategy_config` table (single source of truth shared with market-scan and
+ * the dashboard — see trading_schema_v18_strategy_config.sql). Hard-coded
+ * values above stay as fallbacks if the migration is pending or the read fails.
+ */
+// deno-lint-ignore no-explicit-any
+async function applyStrategyConfig(supabase: any, log: string[]): Promise<void> {
+  try {
+    const { data, error } = await supabase.from('strategy_config').select('*').eq('id', true).maybeSingle();
+    if (error || !data) {
+      log.push('Strategie-Konfiguration (v18) nicht verfügbar — Lauf nutzt die eingebauten Standardwerte.');
+      return;
+    }
+    const num = (v: unknown, fallback: number) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+    TAKE_PROFIT = num(data.take_profit, TAKE_PROFIT);
+    STOP_LOSS = num(data.stop_loss, STOP_LOSS);
+    HARD_STOP = num(data.hard_stop, HARD_STOP);
+    DIP_THRESH = num(data.dip_thresh, DIP_THRESH);
+    NEAR_DIP_BUFFER = num(data.near_dip_buffer, NEAR_DIP_BUFFER);
+  } catch (err) {
+    log.push(`Strategie-Konfiguration konnte nicht geladen werden (${err}) — Standardwerte aktiv.`);
+  }
+}
+
 Deno.serve(async () => {
   // Skip the entire run while US exchanges are closed: no exit could be
   // executed even if one triggered, prices haven't moved since the last
@@ -328,6 +353,9 @@ Deno.serve(async () => {
 
   const log: string[] = [];
   try {
+    // v18: DB-backed strategy knobs (falls back to the defaults above).
+    await applyStrategyConfig(supabase, log);
+
     const { data: portfolioRow, error: portfolioError } = await supabase
       .from('portfolio')
       .select('*')
@@ -373,6 +401,20 @@ Deno.serve(async () => {
       if (newHigh > position.high_since_entry) {
         await supabase.from('positions').update({ high_since_entry: newHigh }).eq('id', position.id);
         position.high_since_entry = newHigh;
+      }
+
+      // Keep the multi-week reference high current INTRADAY too. market-scan
+      // refreshes `recent_high` only every ~6h — if the stock makes a fresh
+      // high between scans and then slides 6%, a stale (lower) reference makes
+      // the dip look shallower than it is, flips `wouldBuyNow` to false, and
+      // this function would SELL where market-scan (whose daily-close data
+      // includes today's running close) would HOLD — reopening the exact churn
+      // window the suppression exists to close. A new price above the stored
+      // multi-week high IS the new multi-week high, so ratcheting it up here
+      // keeps both functions judging the dip against the same reference.
+      if (position.recent_high != null && price > position.recent_high) {
+        await supabase.from('positions').update({ recent_high: price }).eq('id', position.id);
+        position.recent_high = price;
       }
 
       const changePct = (price - position.entry_price) / position.entry_price;

@@ -114,6 +114,25 @@ export class TradingService {
   }
 
   /**
+   * Singleton strategy-config row (v18) — the single source of truth for the
+   * tuning knobs shared by both Edge Functions and this dashboard's labels/
+   * exit-bar. Returns `null` when the v18 migration hasn't been applied yet
+   * (callers keep their built-in defaults in that case).
+   */
+  async getStrategyConfig(): Promise<StrategyConfigRow | null> {
+    const { data, error } = await this.getClient()
+      .from('strategy_config')
+      .select('*')
+      .eq('id', true)
+      .maybeSingle();
+    if (error) {
+      console.warn('strategy_config nicht verfügbar (Migration v18 ausgeführt?):', error.message);
+      return null;
+    }
+    return (data as StrategyConfigRow | null) ?? null;
+  }
+
+  /**
    * Full signal HISTORY (not deduped) for the forward-return / signal-edge
    * analysis — every scan's price + verdict per ticker, so the dashboard can
    * ask "what did the price actually do AFTER an 'organic' vs 'pure-hype'
@@ -386,6 +405,26 @@ export interface ZScoreBucketPerformanceRow {
   avg_realized_pnl: number | null;
   avg_z_score_in_bucket: number | null;
   avg_price_trend_pct: number | null;
+}
+
+/**
+ * Row of `strategy_config` (v18) — singleton table holding the strategy's
+ * tuning knobs, shared by market-scan, price-refresh and this dashboard so the
+ * three can't drift apart (see trading_schema_v18_strategy_config.sql).
+ */
+export interface StrategyConfigRow {
+  id: boolean;
+  take_profit: number;
+  stop_loss: number;
+  hard_stop: number;
+  dip_thresh: number;
+  near_dip_buffer: number;
+  consecutive_organic_threshold: number;
+  position_size: number;
+  max_positions: number;
+  hype_block_thr: number;
+  round_trip_fee_pct: number;
+  updated_at: string;
 }
 
 export interface SignalRow {

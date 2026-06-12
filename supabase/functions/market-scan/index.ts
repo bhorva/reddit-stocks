@@ -83,7 +83,7 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.45.0';
 // verteilung" card on the dashboard), but with ~10k CHF of simulated capital
 // and a realistically low swing-trading cadence (a handful of trades a week,
 // at most), the fixed-cost drag was the more pressing of the two problems.
-const POSITION_SIZE = 0.24; // fraction of total portfolio value per buy — raised from 0.12, see comment above
+let POSITION_SIZE = 0.24; // fraction of total portfolio value per buy — raised from 0.12, see comment above
 
 // A swing entry wants a real pullback into a base, not a blip that fully
 // reverts before the next scan even looks at it — -2.5% is noise on a
@@ -91,7 +91,7 @@ const POSITION_SIZE = 0.24; // fraction of total portfolio value per buy — rai
 // measured against a multi-week high rather than an intraday wiggle, so the
 // signal means "this stock pulled back meaningfully," not "it dipped for an
 // hour."
-const DIP_THRESH = -0.04; // buy once price has dropped this much from its recent (multi-week) high
+let DIP_THRESH = -0.04; // buy once price has dropped this much from its recent (multi-week) high
 
 // ── Two-level exit design (intelligent sell/hold) ─────────────────────────
 // An open position has THREE exit triggers, not the old single stop:
@@ -124,17 +124,17 @@ const DIP_THRESH = -0.04; // buy once price has dropped this much from its recen
 // full ~4.4% round trip — comfortably more than the extra 2% of drawdown the
 // wider floor risks. The trailing stop (level 3) still protects profit near
 // the highs, where suppression doesn't apply (no longer a dip to re-buy).
-const TAKE_PROFIT = 0.20; // unconditional take-profit, % gain from entry
-const STOP_LOSS = -0.06; // trailing-stop DISTANCE below the since-entry peak (level 3)
-const HARD_STOP = -0.08; // unconditional capital floor, % loss from entry (level 2)
+let TAKE_PROFIT = 0.20; // unconditional take-profit, % gain from entry
+let STOP_LOSS = -0.06; // trailing-stop DISTANCE below the since-entry peak (level 3)
+let HARD_STOP = -0.08; // unconditional capital floor, % loss from entry (level 2)
 
 // Trimmed from 5 to 3 alongside the POSITION_SIZE increase (0.12 → 0.24) —
 // see the comment there: fewer, larger slots in exchange for each trade's
 // near-flat brokerage commission costing a much smaller percentage. At 0.24
 // each, 3 slots cap invested capital at ~72% (vs. the previous 5 × 0.12 =
 // 60%), leaving a comparable cash buffer for fees/slippage/new candidates.
-const MAX_POSITIONS = 3;
-const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
+let MAX_POSITIONS = 3;
+let HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 
 // ── Measure 1: Near-miss dip buffer ──────────────────────────────────────
 // A ticker sitting 3.7% below its multi-week high with full organic
@@ -148,8 +148,8 @@ const HYPE_BLOCK_THR = 65; // hype score above which a ticker can be blocked
 // classified 'organic' in at least CONSECUTIVE_ORGANIC_THRESHOLD prior
 // scans in a row (Measure 3) — repeated confirmation is strong evidence of
 // a genuine trend, not a one-scan noise spike.
-const NEAR_DIP_BUFFER = 0.01;            // 1 pp above DIP_THRESH qualifies — but only with streak confirmation
-const CONSECUTIVE_ORGANIC_THRESHOLD = 2; // min consecutive prior organic scans required for a near-miss buy
+let NEAR_DIP_BUFFER = 0.01;            // 1 pp above DIP_THRESH qualifies — but only with streak confirmation
+let CONSECUTIVE_ORGANIC_THRESHOLD = 2; // min consecutive prior organic scans required for a near-miss buy
 
 // Currency-conversion spread Swissquote charges when trading USD-denominated
 // stocks from a CHF-denominated account (in addition to the brokerage
@@ -1098,6 +1098,41 @@ function classify(
   };
 }
 
+/**
+ * v18: load the strategy knobs from the singleton `strategy_config` table and
+ * apply them onto the module-level bindings above — making the DB the single
+ * source of truth shared with price-refresh and the dashboard (see
+ * trading_schema_v18_strategy_config.sql for why). The hard-coded values stay
+ * as fallbacks: if the migration is pending or the read fails, the run
+ * proceeds on the defaults it always had, just with a log line.
+ */
+// deno-lint-ignore no-explicit-any
+async function applyStrategyConfig(supabase: any, log: string[]): Promise<void> {
+  try {
+    const { data, error } = await supabase.from('strategy_config').select('*').eq('id', true).maybeSingle();
+    if (error || !data) {
+      log.push('Strategie-Konfiguration (v18) nicht verfügbar — Lauf nutzt die eingebauten Standardwerte.');
+      return;
+    }
+    const num = (v: unknown, fallback: number) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+    TAKE_PROFIT = num(data.take_profit, TAKE_PROFIT);
+    STOP_LOSS = num(data.stop_loss, STOP_LOSS);
+    HARD_STOP = num(data.hard_stop, HARD_STOP);
+    DIP_THRESH = num(data.dip_thresh, DIP_THRESH);
+    NEAR_DIP_BUFFER = num(data.near_dip_buffer, NEAR_DIP_BUFFER);
+    CONSECUTIVE_ORGANIC_THRESHOLD = num(data.consecutive_organic_threshold, CONSECUTIVE_ORGANIC_THRESHOLD);
+    POSITION_SIZE = num(data.position_size, POSITION_SIZE);
+    MAX_POSITIONS = num(data.max_positions, MAX_POSITIONS);
+    HYPE_BLOCK_THR = num(data.hype_block_thr, HYPE_BLOCK_THR);
+    log.push(
+      `Strategie-Konfiguration geladen (v18): TP ${(TAKE_PROFIT * 100).toFixed(0)}% · Trailing ${(STOP_LOSS * 100).toFixed(0)}% ` +
+        `· Hard-Stop ${(HARD_STOP * 100).toFixed(0)}% · Dip ${(DIP_THRESH * 100).toFixed(0)}% · ${MAX_POSITIONS} Slots à ${(POSITION_SIZE * 100).toFixed(0)}%.`,
+    );
+  } catch (err) {
+    log.push(`Strategie-Konfiguration konnte nicht geladen werden (${err}) — Standardwerte aktiv.`);
+  }
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────
 Deno.serve(async () => {
   const supabaseUrl = Deno.env.get('SUPABASE_URL')!;
@@ -1127,6 +1162,9 @@ Deno.serve(async () => {
   );
 
   try {
+    // v18: DB-backed strategy knobs (falls back to the defaults above).
+    await applyStrategyConfig(supabase, log);
+
     const { data: portfolioRow, error: portfolioError } = await supabase
       .from('portfolio')
       .select('*')

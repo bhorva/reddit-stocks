@@ -19,6 +19,7 @@ import {
   PositionRow,
   PushNotificationRow,
   SignalRow,
+  StrategyConfigRow,
   TradingService,
   TransactionRow,
   VerdictPerformanceRow,
@@ -2245,24 +2246,36 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     return days === 1 ? 'gestern' : `vor ${days} Tagen`;
   }
 
-  // Mirrors the constants in both Edge Functions — see market-scan's
-  // two-level exit design comment (at HARD_STOP) for the full reasoning.
-  // Current numbers (keep in sync when tuning the engine!): round-trip cost
-  // ≈ 4.4% (≈30 CHF commission + ~0.95% FX margin EACH WAY on a ~2'400 CHF
-  // position), TAKE_PROFIT +20% → net win ≈ +15.6%, HARD_STOP −8% → net
-  // loss ≈ −12.4%, breakeven hit rate ≈ 44%. The trailing stop (−6% below
-  // the since-entry peak) is verdict-aware: suppressed while the position
-  // is still buy-eligible (organic + in dip range) — see the engines.
-  protected readonly takeProfit = 0.2;
-  protected readonly stopLoss = -0.06; // trailing-stop distance below the since-entry peak (STOP_LOSS)
-  protected readonly hardStop = -0.08; // unconditional capital floor, % loss from entry (HARD_STOP)
+  // Strategy knobs shown in labels/exit-bars. Since v18 these are loaded from
+  // the singleton `strategy_config` table — the SAME row both Edge Functions
+  // read at the start of every run — so dashboard and engine can no longer
+  // drift apart (see trading_schema_v18_strategy_config.sql and
+  // applyStrategyConfig below). The literals here are only the fallback while
+  // that migration is pending / the row hasn't loaded yet. Reference math at
+  // the defaults: round-trip cost ≈ 4.4%, TAKE_PROFIT +20% → net win ≈ +15.6%,
+  // HARD_STOP −8% → net loss ≈ −12.4%, breakeven hit rate ≈ 44%; the −6%
+  // trailing stop is verdict-aware (suppressed while still buy-eligible).
+  protected takeProfit = 0.2;
+  protected stopLoss = -0.06; // trailing-stop distance below the since-entry peak (STOP_LOSS)
+  protected hardStop = -0.08; // unconditional capital floor, % loss from entry (HARD_STOP)
   // Approx. Swissquote round-trip cost (brokerage + FX margin, BOTH legs) on a
   // typical ~24%-of-portfolio position — see the fee math in market-scan. A
   // trailing-stop exit is only a NET gain once the stop sits at least this far
   // above entry; below it, "stop above entry" still means a small after-fee
   // loss. Used purely to label the positions card honestly (not an exit gate).
-  protected readonly roundTripFeePct = 0.044;
-  protected readonly maxPositions = 3; // kept in sync with MAX_POSITIONS in market-scan/index.ts
+  protected roundTripFeePct = 0.044;
+  protected maxPositions = 3; // MAX_POSITIONS
+
+  /** v18: overwrite the fallback knobs above with the DB-backed config row. */
+  private applyStrategyConfig(cfg: StrategyConfigRow | null): void {
+    if (!cfg) return; // migration pending / read failed → keep fallbacks
+    const num = (v: unknown, fallback: number) => (Number.isFinite(Number(v)) ? Number(v) : fallback);
+    this.takeProfit = num(cfg.take_profit, this.takeProfit);
+    this.stopLoss = num(cfg.stop_loss, this.stopLoss);
+    this.hardStop = num(cfg.hard_stop, this.hardStop);
+    this.roundTripFeePct = num(cfg.round_trip_fee_pct, this.roundTripFeePct);
+    this.maxPositions = num(cfg.max_positions, this.maxPositions);
+  }
   // Fallback USD/CHF rate when no live rate is recorded yet — matches the
   // FALLBACK_USD_CHF_RATE constant in the Edge Functions so client-side CHF
   // conversions line up with what the engine writes to balance_history.
@@ -2707,17 +2720,19 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
 
       // Heavy/slow-moving data: full load + at most every HEAVY_REFRESH_MS.
       if (!silent || Date.now() - this.lastHeavyLoadAt >= TradingDashboardComponent.HEAVY_REFRESH_MS) {
-        const [missedOpportunities, verdictPerformance, zScorePerformance, signalHistory] =
+        const [missedOpportunities, verdictPerformance, zScorePerformance, signalHistory, strategyConfig] =
           await Promise.all([
             this.trading.getMissedOpportunities(),
             this.trading.getVerdictPerformance(),
             this.trading.getZScoreBucketPerformance(),
             this.trading.getSignalHistory(),
+            this.trading.getStrategyConfig(),
           ]);
         this.missedOpportunities.set(missedOpportunities);
         this.verdictPerformance.set(verdictPerformance);
         this.zScorePerformance.set(zScorePerformance);
         this.signalHistory.set(signalHistory);
+        this.applyStrategyConfig(strategyConfig);
         this.lastHeavyLoadAt = Date.now();
       }
 
