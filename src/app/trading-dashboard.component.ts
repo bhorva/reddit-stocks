@@ -2246,15 +2246,13 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
   }
 
   // Mirrors the constants in both Edge Functions — see market-scan's
-  // strategy-constants comment for the full reasoning. Short version: with
-  // Swissquote's ~6.3% round-trip cost (brokerage + FX margin, EACH WAY,
-  // hitting every exit regardless of win/lose), single-digit-percent
-  // thresholds make the strategy structurally unprofitable (an ±8%/±3.5%
-  // pair nets roughly +1.7% on wins vs. -9.8% on losses — an ~85% hit rate
-  // just to break even). The strategy is now SWING-shaped — larger targets
-  // over days-to-weeks holds — so that ~6.3% tax stays a small fraction of
-  // the targeted move: net win ≈ +13.7%, net loss ≈ -12.3%, breakeven hit
-  // rate ≈ 47%, a realistic bar for a heuristic with a genuine edge.
+  // two-level exit design comment (at HARD_STOP) for the full reasoning.
+  // Current numbers (keep in sync when tuning the engine!): round-trip cost
+  // ≈ 4.4% (≈30 CHF commission + ~0.95% FX margin EACH WAY on a ~2'400 CHF
+  // position), TAKE_PROFIT +20% → net win ≈ +15.6%, HARD_STOP −8% → net
+  // loss ≈ −12.4%, breakeven hit rate ≈ 44%. The trailing stop (−6% below
+  // the since-entry peak) is verdict-aware: suppressed while the position
+  // is still buy-eligible (organic + in dip range) — see the engines.
   protected readonly takeProfit = 0.2;
   protected readonly stopLoss = -0.06; // trailing-stop distance below the since-entry peak (STOP_LOSS)
   protected readonly hardStop = -0.08; // unconditional capital floor, % loss from entry (HARD_STOP)
@@ -2659,6 +2657,16 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     this.allocationChart?.destroy();
   }
 
+  /**
+   * Slow-changing ("heavy") data is refetched at most this often during the
+   * 60s background polls. The signal HISTORY alone is up to 12k rows — pulling
+   * it every minute would burn ~1MB/min of Supabase egress on an open dashboard
+   * for data that only changes when a scan runs (4×/day). The analysis views
+   * and missed-opportunities list only change on scans/closed trades too.
+   */
+  private static readonly HEAVY_REFRESH_MS = 30 * 60 * 1000;
+  private lastHeavyLoadAt = 0;
+
   private async load(silent = false): Promise<void> {
     // `silent` = background auto-refresh: don't flash the loading spinner, and
     // on failure keep the data already on screen instead of replacing it with
@@ -2666,6 +2674,9 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
     if (!silent) this.loading.set(true);
     this.error.set(null);
     try {
+      // Live data: small payloads that genuinely move between polls
+      // (portfolio/positions/balance_history every ~30min via price-refresh,
+      // notifications on any trade). Fetched on EVERY poll.
       const [
         portfolio,
         positions,
@@ -2673,12 +2684,8 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
         balanceHistory,
         signals,
         watchlist,
-        missedOpportunities,
         lastScanAt,
-        verdictPerformance,
-        zScorePerformance,
         pushNotifications,
-        signalHistory,
       ] = await Promise.all([
         this.trading.getPortfolio(),
         this.trading.getPositions(),
@@ -2686,12 +2693,8 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
         this.trading.getBalanceHistory(),
         this.trading.getWatchlistSignals(),
         this.trading.getWatchlist(),
-        this.trading.getMissedOpportunities(),
         this.trading.getLastScanTime(),
-        this.trading.getVerdictPerformance(),
-        this.trading.getZScoreBucketPerformance(),
         this.trading.getPushNotifications(),
-        this.trading.getSignalHistory(),
       ]);
       this.portfolio.set(portfolio);
       this.positions.set(positions);
@@ -2699,12 +2702,24 @@ export class TradingDashboardComponent implements OnInit, AfterViewInit, OnDestr
       this.balanceHistory.set(balanceHistory);
       this.signals.set(signals);
       this.watchlist.set(watchlist);
-      this.missedOpportunities.set(missedOpportunities);
       this.lastScanAt.set(lastScanAt);
-      this.verdictPerformance.set(verdictPerformance);
-      this.zScorePerformance.set(zScorePerformance);
       this.pushNotifications.set(pushNotifications);
-      this.signalHistory.set(signalHistory);
+
+      // Heavy/slow-moving data: full load + at most every HEAVY_REFRESH_MS.
+      if (!silent || Date.now() - this.lastHeavyLoadAt >= TradingDashboardComponent.HEAVY_REFRESH_MS) {
+        const [missedOpportunities, verdictPerformance, zScorePerformance, signalHistory] =
+          await Promise.all([
+            this.trading.getMissedOpportunities(),
+            this.trading.getVerdictPerformance(),
+            this.trading.getZScoreBucketPerformance(),
+            this.trading.getSignalHistory(),
+          ]);
+        this.missedOpportunities.set(missedOpportunities);
+        this.verdictPerformance.set(verdictPerformance);
+        this.zScorePerformance.set(zScorePerformance);
+        this.signalHistory.set(signalHistory);
+        this.lastHeavyLoadAt = Date.now();
+      }
 
       const latestSnapshot = balanceHistory[balanceHistory.length - 1];
       this.totalValue.set(latestSnapshot ? latestSnapshot.total_value : portfolio.cash);

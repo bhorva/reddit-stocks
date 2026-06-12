@@ -1918,10 +1918,32 @@ Deno.serve(async () => {
         .eq('id', true);
     }
 
+    // ── Snapshot from FRESH DB state, not this run's in-memory copy ─────
+    // The atomic delta apply above keeps the portfolio ROW correct under
+    // concurrency, but this run's in-memory `portfolio.cash`/`positions` can
+    // still be stale by now: if price-refresh sold a position DURING this
+    // (long, network-heavy) run, our memory has neither the proceeds nor the
+    // removed position — a snapshot from memory would record exactly the kind
+    // of inconsistent point the v16 fix was about. Two tiny reads (singleton
+    // row + ≤MAX_POSITIONS rows) make the snapshot match reality.
+    const { data: freshPortfolioRow } = await supabase
+      .from('portfolio')
+      .select('cash')
+      .eq('id', true)
+      .maybeSingle();
+    const snapshotCash = freshPortfolioRow ? Number(freshPortfolioRow.cash) : portfolio.cash;
+    const { data: freshPositionRows } = await supabase
+      .from('positions')
+      .select('ticker, shares, entry_price');
+    const snapshotPositions = (freshPositionRows ?? positions) as Pick<
+      PositionRow,
+      'ticker' | 'shares' | 'entry_price'
+    >[];
+
     // Mark-to-market value of open positions, in CHF — `shares`/`price` are
     // USD-denominated, so the live `usdChfRate` (fetched once, up top)
     // converts the snapshot to the same currency as `cash`/`total_value`.
-    const positionsValueUsd = positions.reduce(
+    const positionsValueUsd = snapshotPositions.reduce(
       (sum, p) => sum + p.shares * (latestPrices.get(p.ticker) ?? p.entry_price),
       0,
     );
@@ -1933,9 +1955,9 @@ Deno.serve(async () => {
       log.push('SPY-Benchmarkpreis konnte nicht geladen werden — Vergleichschart bleibt für diesen Lauf ohne neuen Punkt.');
     }
     await supabase.from('balance_history').insert({
-      cash: portfolio.cash,
+      cash: snapshotCash,
       positions_value: positionsValue,
-      total_value: portfolio.cash + positionsValue,
+      total_value: snapshotCash + positionsValue,
       spy_price: spyPrice,
       usd_chf_rate: usdChfRate,
       // v10: macro gate score stored on every snapshot — dashboard derives the

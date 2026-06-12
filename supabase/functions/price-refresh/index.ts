@@ -536,25 +536,44 @@ Deno.serve(async () => {
         .eq('id', true);
     }
 
+    // Snapshot from FRESH DB state, not this run's in-memory copy — if
+    // market-scan traded while this run was in flight, memory is stale and a
+    // memory-based snapshot records an inconsistent point (the same class of
+    // glitch the v16 atomic apply fixed for the portfolio row itself). Two
+    // tiny reads make the snapshot match reality; mirrors market-scan.
+    const { data: freshPortfolioRow } = await supabase
+      .from('portfolio')
+      .select('cash')
+      .eq('id', true)
+      .maybeSingle();
+    const snapshotCash = freshPortfolioRow ? Number(freshPortfolioRow.cash) : portfolio.cash;
+    const { data: freshPositionRows } = await supabase
+      .from('positions')
+      .select('ticker, shares, entry_price');
+    const snapshotPositions = (freshPositionRows ?? positions) as Pick<
+      PositionRow,
+      'ticker' | 'shares' | 'entry_price'
+    >[];
+
     // USD-denominated mark-to-market value, converted to CHF via the same
     // live rate used for every other conversion this run (see `market-scan`'s
     // snapshot for the identical reasoning).
-    const positionsValueUsd = positions.reduce(
+    const positionsValueUsd = snapshotPositions.reduce(
       (sum, p) => sum + p.shares * (latestPrices.get(p.ticker) ?? p.entry_price),
       0,
     );
     const positionsValue = positionsValueUsd * usdChfRate;
     const spyPrice = await fetchBenchmarkPrice();
     await supabase.from('balance_history').insert({
-      cash: portfolio.cash,
+      cash: snapshotCash,
       positions_value: positionsValue,
-      total_value: portfolio.cash + positionsValue,
+      total_value: snapshotCash + positionsValue,
       spy_price: spyPrice,
       usd_chf_rate: usdChfRate,
     });
     log.push(
-      `Portfolio aktualisiert: Cash ${portfolio.cash.toFixed(2)} CHF, ` +
-        `Positionswert ${positionsValue.toFixed(2)} CHF, Gesamt ${(portfolio.cash + positionsValue).toFixed(2)} CHF.`,
+      `Portfolio aktualisiert: Cash ${snapshotCash.toFixed(2)} CHF, ` +
+        `Positionswert ${positionsValue.toFixed(2)} CHF, Gesamt ${(snapshotCash + positionsValue).toFixed(2)} CHF.`,
     );
 
     return new Response(JSON.stringify({ ok: true, log }, null, 2), {
